@@ -334,3 +334,14 @@ test("a request over either context budget is refused before any send, and one j
   await run.close();
   assert.equal(served, 1);
 });
+
+test("the gate sets the pinned wire model and refuses any other", async (t) => {
+  const f = setup(t);
+  const run = f.jev.run();
+  const { model, ...unpinned } = request("public");
+  assert.equal((await run.ask(unpinned)).answers.q.noul, 0.9);
+  assert.equal(f.sent[0].model, model);
+  await assert.rejects(run.ask({ ...unpinned, model: "jev-0.0.1" }), /not pinned/);
+  await run.close();
+  assert.equal(f.sent.length, 1);
+});
