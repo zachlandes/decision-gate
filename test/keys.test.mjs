@@ -132,11 +132,11 @@ test("two keys on one account share one rate window and one 429 pause", async (t
 });
 
 test("an account keeps four small requests in flight across its keys, and large ones one at a time", async (t) => {
-  const w = await twoKeys(t, { hold: { open: 5, ms: 300 } });
+  const w = await twoKeys(t, { hold: { open: 5, ms: 1000 } });
   await Promise.all(Array.from({ length: 8 }, (_, i) => w.ask(i % 2 ? "a" : "b")));
   assert.equal(w.server.peak(), 4);
   assert.equal(w.jevs.a.config.limits.inFlight, 4);
-  const narrow = await twoKeys(t, { hold: { open: 3, ms: 300 }, limits: { in_flight: 2 } });
+  const narrow = await twoKeys(t, { hold: { open: 3, ms: 1000 }, limits: { in_flight: 2 } });
   await Promise.all(Array.from({ length: 6 }, (_, i) => narrow.ask(i % 2 ? "a" : "b")));
   assert.equal(narrow.server.peak(), 2);
   // About 32,500 tokens each at the measured quarter token per byte

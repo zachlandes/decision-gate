@@ -121,10 +121,14 @@ Await `close()` to replace the run's hold with its committed cost.
 Its `ceiling` is `"day"` when what is left of today bounds the run and `"run"` otherwise.
 Asks within one run may overlap: when the run's ceiling is full, an attempt waits for another to settle and is refused with a `SpendCapError` only when none is in flight.
 `close()` waits for asks already made before it records the run's cost.
+A request too long for the pinned model is refused with a `RequestSizeError` before anything is queued or sent.
+The model's context length has two budgets: 65,536 tokens for the whole request (`MAX_INPUT_TOKENS`), and 32,768 tokens for the `state` plus the single longest question (`MAX_STATE_QUESTION_TOKENS`).
+Both are checked with the same estimate of a quarter token per serialized byte that `estimateUsd` uses, so a state of about 100,000 ASCII characters with short questions fits.
+The estimate is not exact, so a request close to either budget can still be rejected by the service.
 Use `describeError` for a safe diagnostic instead of logging a transport exception or provider response body.
-The errors it passes through are `ConfigError`, `ServiceError` (with the HTTP `status`), `SpendCapError`, `RedactionError` and `StateError`.
+The errors it passes through are `ConfigError`, `ServiceError` (with the HTTP `status`), `SpendCapError`, `RedactionError`, `RequestSizeError` and `StateError`; none carries request text.
 
-`PINNED_MODEL`, `MAX_INPUT_TOKENS`, `usdFor(tokens)` and `estimateUsd(bytes)` describe the pinned model's request limit and price.
+`PINNED_MODEL`, `MAX_INPUT_TOKENS`, `MAX_STATE_QUESTION_TOKENS`, `usdFor(tokens)` and `estimateUsd(bytes)` describe the pinned model's request limits and price.
 `estimateUsd` uses the measured rate of about a quarter token per byte, for figures shown before a run; it is not a reservation.
 
 ## Answer cache
@@ -184,7 +188,6 @@ The lock is published with its owner already inside, so a crash cannot leave an 
 A lock whose owner process is gone, or that is older than 30 seconds, is moved aside under a name tied to that owner, so two processes reclaiming the same stale lock cannot remove a newer one.
 
 The reservation uses the pinned model's full documented request limit of 65,536 tokens (`MAX_INPUT_TOKENS`), not an empirical bytes-per-token ratio.
-That figure is being checked: a third-party report puts the real limit nearer 32k, and the constant changes only once that check reports.
 Successful responses replace the reservation with reported input usage.
 An uncertain attempt remains booked at its reservation.
 This can refuse a very small allowance even when a displayed estimate is lower.

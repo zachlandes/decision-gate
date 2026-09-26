@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, chmodSyn
 import { hostname, tmpdir } from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { openJev, PINNED_MODEL, MAX_INPUT_TOKENS, usdFor } from "../lib/index.mjs";
+import { createServer } from "node:http";
+import { openJev, describeError, RequestSizeError, PINNED_MODEL, MAX_INPUT_TOKENS, MAX_STATE_QUESTION_TOKENS, usdFor } from "../lib/index.mjs";
 import { createLimiter } from "../lib/limits.mjs";
 import { createLedger } from "../lib/ledger.mjs";
 import { answerCache } from "../lib/cache.mjs";
@@ -294,4 +295,42 @@ test("a tool must name itself, and the never-send check refuses before anything 
   assert.throws(() => f.jev.redactor.check(JSON.stringify({ state: { "Bearer abcdefghijklmnopqrst": "value" } })), /never-send/);
   assert.equal(f.jev.redactor.check(JSON.stringify(request("public"))), undefined);
   assert.equal(f.sent.length, 0);
+});
+
+test("a request over either context budget is refused before any send, and one just under is sent", async (t) => {
+  let served = 0;
+  const server = createServer(async (req, res) => {
+    served++;
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ model: PINNED_MODEL, answers: Object.fromEntries(Object.keys(JSON.parse(body).questions).map((id) => [id, { type: "noul", noul: 0.9 }])), usage: { input_tokens: 100 } }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const dir = mkdtempSync(path.join(tmpdir(), "decision-gate-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const env = { XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, TYPESAFE_API_KEY: "fixture-only", DECISION_GATE_ENDPOINT: `http://127.0.0.1:${server.address().port}/v1/systemone` };
+  const jev = openJev({ env, maxRetries: 0, tool: "fixture" });
+  // The gate estimates a quarter token per serialized byte
+  const stateBytes = MAX_STATE_QUESTION_TOKENS * 4;
+  const question = (instructions) => ({ type: "noul", instructions });
+  // Pads the state so it and its one question serialize to exactly `bytes`
+  const sized = (bytes) => {
+    const q = question("Is the text useful?");
+    const padding = bytes - Buffer.byteLength(JSON.stringify({ text: "" })) - Buffer.byteLength(JSON.stringify(q));
+    return { model: PINNED_MODEL, state: { text: "a".repeat(padding) }, questions: { q } };
+  };
+  // Each question fits the state budget, but together they pass the whole-request budget
+  const wide = { model: PINNED_MODEL, state: { text: "public" }, questions: Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`q${i}`, question("b".repeat(60000))])) };
+  const run = jev.run();
+  for (const [request, message] of [[sized(stateBytes + 1), /^state plus its longest question is estimated above the model's 32768-token limit; nothing was sent$/], [wide, /^request is estimated above the model's 65536-token limit; nothing was sent$/]]) {
+    const error = await run.ask(request).then(() => assert.fail("an over-long request was accepted"), (e) => e);
+    assert.ok(error instanceof RequestSizeError);
+    assert.match(describeError(error), message);
+  }
+  assert.equal(served, 0);
+  assert.equal((await run.ask(sized(stateBytes))).answers.q.noul, 0.9);
+  await run.close();
+  assert.equal(served, 1);
 });
