@@ -1,0 +1,39 @@
+{
+  "name": "decision-gate",
+  "version": "0.1.0",
+  "description": "One gate for Node tools that spend a user's key on a decision model: key sources, never-send checks, spend ceilings, a shared rate limiter, an answer cache that stores no text, and a cost ledger",
+  "type": "module",
+  "files": [
+    "lib/",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./lib/index.mjs"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zachlandes/jevzf.git",
+    "directory": "packages/decision-gate"
+  },
+  "bugs": {
+    "url": "https://github.com/zachlandes/jevzf/issues"
+  },
+  "homepage": "https://github.com/zachlandes/jevzf/tree/main/packages/decision-gate#readme",
+  "keywords": [
+    "jev",
+    "typesafe",
+    "decision-model",
+    "spend-limit",
+    "rate-limit"
+  ],
+  "dependencies": {
+    "@typesafe-ai/sdk": "0.6.0"
+  }
+}

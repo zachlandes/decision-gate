@@ -1,0 +1,11 @@
+decision-gate
+Copyright 2026 Zachary Landes
+Licensed under the Apache License, Version 2.0.
+
+Redaction, spend budgeting and the Jev client are adapted from
+zachlandes/herdr-find, commit 4736dd5 (Apache-2.0), originally developed in
+Dewey, by way of jevzf.
+Modified for shared key handling, durable spend reservations, a
+cross-process rate limiter and an answer cache.
+
+This project is unofficial and is not affiliated with TypeSafe.
