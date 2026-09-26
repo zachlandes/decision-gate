@@ -37,9 +37,9 @@ for (const status of [429, 529]) {
     await run.close();
     assert.equal(attempts, 2);
     assert.equal(run.summary().committed_usd, usdFor(100) + (status === 529 ? usdFor(MAX_INPUT_TOKENS) : 0));
-    const dir = path.join(f.dir, "decision-gate/limits/typesafe");
-    const state = JSON.parse(readFileSync(path.join(dir, readdirSync(dir).find((name) => name.endsWith(".json")))));
+    const state = JSON.parse(readFileSync(path.join(f.dir, "decision-gate/limits/typesafe/accounts/default.json")));
     assert.equal(state.starts.length, 2);
+    assert.deepEqual(state.inFlight, []);
     assert.ok(state.pausedUntil > 0);
   });
 }
@@ -62,15 +62,16 @@ test("shared limiter enforces rolling requests, reserved tokens and pauses using
   let now = 100000;
   const waits = [];
   const time = { now: () => now, sleep: async (ms) => { waits.push(ms); now += ms; } };
-  const options = { dir: f.dir, fingerprint: "shared", limits: { requestsPerMinute: 2, tokensPerSecond: 100, share: 1 }, time };
+  const options = { dir: f.dir, limits: { requestsPerMinute: 2, tokensPerSecond: 100, share: 1, inFlight: 4, largeInFlight: 1, largeRequestTokens: 32000 }, time };
   const a = createLimiter(options), b = createLimiter(options);
-  await a.take(60);
-  await b.take(60);
+  const take = async (limiter, tokens) => (await limiter.take(tokens)).release();
+  await take(a, 60);
+  await take(b, 60);
   assert.equal(now, 101000);
-  await a.take(60);
+  await take(a, 60);
   assert.equal(now, 160000);
   await a.pause(7000);
-  await b.take(20);
+  await take(b, 20);
   assert.equal(now, 167000);
   assert.deepEqual(waits, [1000, 59000, 7000]);
 });
@@ -154,12 +155,12 @@ test("explicit key file takes precedence over the environment and enforces mode 
   await refused.close();
 });
 
-test("separate processes share one limiter window for the same key", async (t) => {
+test("separate processes share one limiter window for the account", async (t) => {
   const f = setup(t);
   const script = `
     import { createLimiter } from ${JSON.stringify(new URL("../lib/limits.mjs", import.meta.url).href)};
-    const limiter = createLimiter({ dir: process.argv[1], fingerprint: "shared", limits: { requestsPerMinute: 100, tokensPerSecond: 100, share: 1 } });
-    await limiter.take(60);
+    const limiter = createLimiter({ dir: process.argv[1], limits: { requestsPerMinute: 100, tokensPerSecond: 100, share: 1, inFlight: 4, largeInFlight: 1, largeRequestTokens: 32000 } });
+    await (await limiter.take(60)).release();
   `;
   const child = () => new Promise((resolve, reject) => {
     const proc = spawn(process.execPath, ["--input-type=module", "-e", script, f.dir]);
@@ -168,7 +169,8 @@ test("separate processes share one limiter window for the same key", async (t) =
   });
   await Promise.all([child(), child(), child()]);
   // Each take reserves 60 of 100 tokens a second, so the shared window must space the three starts
-  const { starts } = JSON.parse(readFileSync(path.join(f.dir, "shared.json"), "utf8"));
+  const { starts, inFlight } = JSON.parse(readFileSync(path.join(f.dir, "accounts/default.json"), "utf8"));
+  assert.deepEqual(inFlight, []);
   const times = starts.map((start) => start.at).sort((a, b) => a - b);
   assert.equal(times.length, 3);
   assert.ok(times[1] - times[0] >= 1000, `${times}`);
