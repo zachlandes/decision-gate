@@ -38,7 +38,7 @@ const cache = jev.cache({ scope: { questions } });
 const run = jev.run();
 
 async function screen(posting, student) {
-  // Emails, known secret formats and any "authorization: <value>" text are replaced before anything is sent or cached
+  // Emails, known secret formats and authorization credentials are replaced before anything is sent or cached
   const state = { posting: jev.redactor.redact(posting), student: jev.redactor.redact(student) };
   const key = (name) => `${name}\n${JSON.stringify(state)}`;
   const result = Object.fromEntries(Object.keys(questions).map((name) => [name, cache.get(key(name))]));
@@ -96,7 +96,12 @@ When the state is most of the request, as a job posting usually is, three questi
 
 **Nothing on the never-send list leaves the machine.**
 Every request is checked, including each retry, and one containing a forbidden value is refused with a `RedactionError` rather than rewritten.
-The built-in rules cover known secret formats and email addresses, and they also rewrite the value after any `authorization:` or `authorization=`, so a line such as "work authorization: US citizen" loses its first word.
+The built-in rules cover known secret formats and email addresses.
+They also rewrite the value after an `authorization`, `proxy-authorization` or `auth` key, as a header, a JSON or YAML key or a parameter, in only two shapes.
+One is an HTTP authentication scheme, such as `Basic`, `Bearer`, `Token`, `Digest`, `Negotiate` or `AWS4-HMAC-SHA256`, followed by a credential, redacted with its parameters to the end of its quotes or line.
+A credential there is an auth-parameter list such as `username="u"`, a placeholder an earlier rule wrote such as `[token]`, or a run with no spaces that is not a plain word: it holds a digit, a capital after its first letter or one of `+ / = . _ ~ -`, or is a single character.
+The other is a token-shaped value: a run of 16 or more characters with no spaces that holds a letter and either a digit, a `+` or a trailing `=`.
+Any other value is kept, so "work authorization: F-1 OPT", "Work Authorization: US citizen", "OPT-STEM-Extension", "PermanentResident" and a posting's "Authorization: must be authorized to work" or "Authorization: Signature required on the I-9" reach the service unchanged.
 Redact text with `jev.redactor.redact` before putting it in a request.
 
 ## Routes other than TypeSafe
@@ -183,7 +188,7 @@ Raw requests are checked, not silently rewritten: a forbidden value in any seria
 Callers that send user text redact it first with `jev.redactor.redact`, and `jev.redactor.check(body)` runs the same final check on a serialized request before anything is queued.
 `jev.redactor.clean(text)` is true when one piece of text would pass that check as a string in a request: nothing forbidden survives in it and the built-in rules would leave it unchanged.
 A caller batching many texts into one request can use it on each redacted text to hold back only the ones the check would refuse, instead of losing the whole request.
-Built-in rules cover known secret formats, email addresses and any `authorization: <value>` text, not arbitrary long hashes or random-looking strings, so file paths reach the service unchanged.
+Built-in rules cover known secret formats, email addresses and authorization credentials in the two shapes above, not arbitrary long hashes or random-looking strings elsewhere, so file paths reach the service unchanged.
 `privateKeyLines(lines)` maps each line of a private key piped in as separate lines to its redacted form, since such a key is only recognisable across lines.
 A private optional never-send file adds user rules and forbidden patterns:
 

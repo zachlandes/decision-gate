@@ -212,6 +212,68 @@ test("credentials in real config formats lose their values while code references
   assert.deepEqual(distinct(send(cases.map(([line]) => line).join("\n")).sent), distinct(cases.map(([, sent]) => sent)));
 });
 
+test("an authorization or auth credential is redacted in header and JSON text, but profile and posting prose is kept", () => {
+  // Synthetic credentials, never real ones
+  const b64 = "QWxhZGRpbjpvcGVuIHNlc2FtZQ==";
+  const hex = "9f3c2a1e4b7d8c6a5f4e3d2c1b0a9f8e";
+  const redacted = [
+    ["Authorization: Bearer abcdefghijklmnop", "Authorization: [redacted]"],
+    ["authorization: bearer abc.def-ghi", "authorization: [redacted]"],
+    ["AUTHORIZATION: BEARER x7", "AUTHORIZATION: [redacted]"],
+    ["Authorization: Basic " + b64, "Authorization: [redacted]"],
+    ["authorization: basic dTpw", "authorization: [redacted]"],
+    ["Authorization: Token 1234", "Authorization: [redacted]"],
+    ["Authorization:Token token=abc, user=zed", "Authorization:[redacted]"],
+    ['Authorization: Digest username="Mufasa", realm="x@example", nonce="dcd98b71", response="' + hex + '"', "Authorization: [redacted]"],
+    ["Authorization: Negotiate YIIGhgYGKwYBBQUCoIIGejCC", "Authorization: [redacted]"],
+    ["Authorization: AWS4-HMAC-SHA256 Credential=x/20260926/us-east-1/s3/aws4_request, Signature=" + hex, "Authorization: [redacted]"],
+    ["Proxy-Authorization: Basic " + b64, "Proxy-Authorization: [redacted]"],
+    ["Authorization: " + hex, "Authorization: [redacted]"],
+    ["authorization=" + b64, "authorization=[redacted]"],
+    ["auth=" + hex + "&user=zed", "auth=[redacted]&user=zed"],
+    ["AUTH: " + b64, "AUTH: [redacted]"],
+    ["basic_auth: " + hex, "basic_auth: [redacted]"],
+    ['{"Authorization": "Bearer abc.def-ghi", "x": 1}', '{"Authorization": "[redacted]", "x": 1}'],
+    ['{"authorization":"Token 1234"}', '{"authorization":"[redacted]"}'],
+    ['{"auth": "' + hex + '", "user": "zed"}', '{"auth": "[redacted]", "user": "zed"}'],
+    ["headers = {'Authorization': 'Basic " + b64 + "'}", "headers = {'Authorization': '[redacted]'}"],
+    ["authorization='Bearer x'", "authorization='[redacted]'"],
+    ['curl -H "Authorization: Bearer abcdefghijklmnop" https://api.example.com', 'curl -H "Authorization: [redacted]" https://api.example.com'],
+    ["curl -H 'Authorization: Digest username=\"u\", response=\"" + hex + "\"' https://x", "curl -H 'Authorization: [redacted]' https://x"],
+    ['curl -H "Authorization: Digest username=\\"u\\", response=\\"' + hex + '\\"" https://x', 'curl -H "Authorization: [redacted]" https://x']
+  ];
+  const kept = [
+    "work authorization: F-1 OPT",
+    "Work Authorization: US citizen",
+    "Authorization: must be authorized to work in the US without sponsorship",
+    "Work authorization: Green card holder",
+    "Work Authorization = H-1B transfer",
+    "authorization: EAD (C8)",
+    '{"work_authorization": "F-1 OPT", "degree": "BS"}',
+    '{"authorization": "US citizen"}',
+    "Employment authorization: not required",
+    "auth: required",
+    "auth=internationalization",
+    "auth: Basic",
+    "work_authorization: OPT-STEM-Extension",
+    '{"work_authorization": "US-Citizen-No-Sponsorship"}',
+    "Work authorization: PermanentResident",
+    "work authorization: Canadian/US-dual-citizen",
+    "authorization: US-citizen-or-green-card",
+    "Authorization: Signature required on the I-9",
+    "Work Authorization: Basic eligibility required",
+    "Work authorization: Key requirement for this role",
+    "Employment Authorization: Mutual agreement",
+    "authorization: Digest of eligibility rules",
+    "work authorization: OAuth not applicable",
+    'headers = {"Authorization": f"Bearer {token}"}',
+    "Authorization: [redacted]"
+  ];
+  assert.deepEqual(distinct(send([...redacted.map(([line]) => line), ...kept].join("\n")).sent), distinct([...redacted.map(([, sent]) => sent), ...kept]));
+  // A caller that skipped redaction is refused by the final check
+  for (const [line] of redacted) assert.equal(redactor.clean(line), false, line);
+});
+
 for (const [name, kind, terminated, prefix] of [
   ["a private key piped as lines spanning batches", "RSA PRIVATE KEY", true, () => ""],
   ["a private key cut off before its END line, as by head", "RSA PRIVATE KEY", false, () => ""],
