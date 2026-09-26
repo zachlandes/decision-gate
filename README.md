@@ -1,39 +1,115 @@
 # decision-gate
 
-The one gate Node tools pass through to spend a user's key on a decision model.
-It decides whether a request may be sent (key, never-send check, spend ceilings, rate limit), sends it through the provider's own SDK, and records what it cost.
-Unofficial; not affiliated with TypeSafe.
+> **Pre-1.0.**
+> This is 0.1.0: the interface may change, and a breaking change raises the minor version.
+> Unofficial; not affiliated with TypeSafe.
 
-Tools that share a key on one machine share its daily ceiling, and every key on one TypeSafe account shares that account's rate window, because every tool reads and writes the same local state.
-Nothing here calls a generative model, stores request text or runs at development time; those belong to the tools themselves.
-The interface is 0.x: a breaking change raises the minor version.
+Rate and spend limits for code that calls Jev in a loop.
+
+If you ask Jev the same kind of question many times, say a go/no-go on every new job posting for each of fifty students, three things go wrong at volume.
+Requests start failing with `429`, and every caller that retries on its own schedule makes it worse.
+The same posting and question get sent twice, and you pay twice.
+And nothing stops a runaway loop before the bill does.
+
+decision-gate is the one place your code sends a Jev request through.
+It waits for room under the account's rate limit, pauses every caller together when the service says to slow down, checks the request against a daily spend ceiling for your key, sends it through TypeSafe's own SDK and records what it cost.
+It also gives you an answer cache, so a question answered in an earlier run, or earlier in the same run, is not asked again.
+It never calls a generative model and never stores request text.
+
+## Quick start
+
+```sh
+npm install decision-gate
+export TYPESAFE_API_KEY=...
+```
 
 ```js
 import { openJev, PINNED_MODEL } from "decision-gate";
 
-const jev = openJev({ tool: "my-tool" }); // TYPESAFE_API_KEY is enough
-const run = jev.run({ capUsd: 0.02 });
+const questions = {
+  fit: { type: "noul", instructions: "Does this posting fit the student's skills and goals?" },
+  eligible: { type: "noul", instructions: "Can the student apply, given the location and their graduation date?" }
+};
+
+const jev = openJev({ tool: "job-screen" });
+// Rewording any question changes the scope, so no old answers are reused
+const cache = jev.cache({ scope: { questions } });
+// Each run is capped at spend.per_run_usd (USD 0.02 by default); open a run per batch for a long job
+const run = jev.run();
+
+async function screen(posting, student) {
+  // Emails, known secret formats and any "authorization: <value>" text are replaced before anything is sent or cached
+  const state = { posting: jev.redactor.redact(posting), student: jev.redactor.redact(student) };
+  const key = (name) => `${name}\n${JSON.stringify(state)}`;
+  const result = Object.fromEntries(Object.keys(questions).map((name) => [name, cache.get(key(name))]));
+  const missing = Object.keys(result).filter((name) => result[name] === undefined);
+  if (missing.length) {
+    // One request answers every missing question over the same state
+    const answer = await run.ask({
+      model: PINNED_MODEL,
+      state,
+      questions: Object.fromEntries(missing.map((name) => [name, questions[name]]))
+    });
+    for (const name of missing) result[name] = answer.answers[name].noul;
+    await cache.put(missing.map((name) => [key(name), result[name]]));
+  }
+  return result;
+}
+
 try {
-  const answer = await run.ask({
-    model: PINNED_MODEL,
-    state: { text: "public example" },
-    questions: {
-      useful: { type: "noul", instructions: "Is the text useful?" }
-    }
-  });
-  console.log(answer.answers.useful.noul);
+  console.log(await screen("Junior data analyst, Denver, hybrid...", "Senior, statistics major, graduates May 2027..."));
 } finally {
   await run.close();
 }
 ```
 
+## What it guarantees
+
+**A `429` slows everyone down together instead of hammering.**
+When TypeSafe answers `429` or `529`, the gate pauses every caller on the account, across every tool and process on the machine, for the server's `Retry-After` delay (one second when none is given).
+The request that got it waits out that pause and is retried, after the server's delay or with exponential backoff when none is given, up to `maxRetries` times (2 by default).
+Only then does the ask fail, with a `ServiceError` whose `status` is `429`.
+
+**It keeps under the account's rate limit before the service has to say so.**
+Requests wait for room under 80% (`limits.share`) of the account's `requests_per_minute` and `tokens_per_second`, at most 4 (`limits.in_flight`) are open at once, and a request of 32,000 tokens or more goes one at a time.
+Every key on the machine shares these limits, because TypeSafe counts them per account, not per key.
+
+**The same question over the same state is answered once.**
+The answer cache stores each answer's probability under a key you choose, such as the question name plus the state, and `cache.get` returns it on the next ask instead of sending the request again.
+Answers last 30 days, and changing the cache's `scope`, the model or the never-send list starts fresh.
+The cache stores only keyed hashes and numbers, never the state or question text.
+A cache sees every answer stored before it was opened plus its own `put`s, so it removes repeats across later runs and within a run.
+It does not see answers another process stores after it was opened, so two processes screening at the same time, or a long-lived cache opened earlier, can each pay for the same question; open a fresh cache for each batch, or screen from one process.
+It also does not merge two identical asks started at the same moment, so check the cache before sending a batch.
+
+**A daily spend ceiling per key.**
+Every tool on the machine that uses the same key shares one daily ceiling, `spend.per_day_usd` (USD 0.20 by default, reset at UTC midnight), and each run has its own ceiling, `spend.per_run_usd` (USD 0.02 by default).
+A request that does not fit under them is not sent, and the ask fails with a `SpendCapError`.
+At the price 0.1.0 records for the pinned model, USD 0.042 per million input tokens with output free, the default daily ceiling covers about 4.7 million input tokens; raise it in the config for more.
+The default run ceiling covers about 476,000, so a long screening job opens a run per batch or raises `per_run_usd` in the config too.
+
+**Several questions over one state go in one call.**
+A Jev request carries one `state` and any number of named `questions`, and the gate sends it as one request: one rate-limit slot, and the state's input tokens paid once however many questions it asks.
+When the state is most of the request, as a job posting usually is, three questions in one call cost little more than one, and use a third of the requests.
+
+**Nothing on the never-send list leaves the machine.**
+Every request is checked, including each retry, and one containing a forbidden value is refused with a `RedactionError` rather than rewritten.
+The built-in rules cover known secret formats and email addresses, and they also rewrite the value after any `authorization:` or `authorization=`, so a line such as "work authorization: US citizen" loses its first word.
+Redact text with `jev.redactor.redact` before putting it in a request.
+
+## Routes other than TypeSafe
+
+decision-gate 0.1.0 sends requests to TypeSafe directly with `TYPESAFE_API_KEY`; other routes, such as AI gateways, are planned.
+Handling a `429` belongs to the gate, not the route: a `429` pauses every caller on the account and the request backs off before retrying.
+
 ## Opening the gate
 
-`openJev({ tool, key, neverSend, spend, env, notice, fetch })` opens a caller.
+`openJev({ tool, key, neverSend, spend, maxRetries, env, notice, fetch })` opens a caller.
 `tool` is required: a short identifier such as `herdr-find` that tags the caller's spend records, not a different service.
 `notice` receives one-line warnings and defaults to a no-op.
 `spend` accepts `perRunUsd` and `perDayUsd`, defaulting to the config's USD 0.02 and USD 0.20.
 The config's daily ceiling covers the key across every tool that uses it; a caller's `perDayUsd` can only lower what that tool spends, never add to the key's.
+`maxRetries` is how many times a failed request is retried, 2 by default.
 `fetch` replaces the network for tests; the destination is still checked.
 
 The returned object holds `status()`, `config`, `redactor`, `remaining()`, `cache()` and `run()`.
@@ -105,7 +181,7 @@ Raw requests are checked, not silently rewritten: a forbidden value in any seria
 Callers that send user text redact it first with `jev.redactor.redact`, and `jev.redactor.check(body)` runs the same final check on a serialized request before anything is queued.
 `jev.redactor.clean(text)` is true when one piece of text would pass that check as a string in a request: nothing forbidden survives in it and the built-in rules would leave it unchanged.
 A caller batching many texts into one request can use it on each redacted text to hold back only the ones the check would refuse, instead of losing the whole request.
-Built-in rules cover known secret formats and email addresses, not arbitrary long hashes or random-looking strings, so file paths reach the service unchanged.
+Built-in rules cover known secret formats, email addresses and any `authorization: <value>` text, not arbitrary long hashes or random-looking strings, so file paths reach the service unchanged.
 `privateKeyLines(lines)` maps each line of a private key piped in as separate lines to its redacted form, since such a key is only recognisable across lines.
 A private optional never-send file adds user rules and forbidden patterns:
 

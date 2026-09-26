@@ -1,7 +1,7 @@
 {
   "name": "decision-gate",
   "version": "0.1.0",
-  "description": "One gate for Node tools that spend a user's key on a decision model: key sources, never-send checks, spend ceilings, a shared rate limiter, an answer cache that stores no text, and a cost ledger",
+  "description": "Rate and spend limits for calling TypeSafe Jev from Node: an account-wide 429 pause with backoff, a shared rate limiter, a per-key daily spend ceiling, an answer cache that stores no text, and never-send checks",
   "type": "module",
   "files": [
     "lib/",
@@ -31,7 +31,13 @@
     "typesafe",
     "decision-model",
     "spend-limit",
-    "rate-limit"
+    "rate-limit",
+    "rate-limiter",
+    "429",
+    "retry",
+    "backoff",
+    "cache",
+    "budget"
   ],
   "dependencies": {
     "@typesafe-ai/sdk": "0.6.0"
