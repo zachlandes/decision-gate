@@ -4,6 +4,8 @@
 > This is 0.1.0: the interface may change, and a breaking change raises the minor version.
 > Unofficial; not affiliated with TypeSafe.
 
+Built with Claude Code.
+
 Rate and spend limits for code that calls Jev in a loop.
 
 If you ask Jev the same kind of question many times, say a go/no-go on every new job posting for each of fifty students, three things go wrong at volume.
