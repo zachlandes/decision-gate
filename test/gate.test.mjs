@@ -140,7 +140,7 @@ test("explicit key file takes precedence over the environment and enforces mode 
   const file = path.join(f.dir, "key");
   writeFileSync(file, "private-file-key", { mode: 0o600 });
   let authorization;
-  const jev = openJev({ env: f.env, tool: "fixture", key: { file }, maxRetries: 0, fetch: async (_url, init) => {
+  const jev = openJev({ env: f.env, tool: "fixture", key: { provider: "typesafe", file }, maxRetries: 0, fetch: async (_url, init) => {
     authorization = init.headers.Authorization ?? init.headers.authorization;
     return new Response(JSON.stringify({ model: PINNED_MODEL, answers: { q: { type: "noul", noul: 0.5 } }, usage: { input_tokens: 100 } }));
   } });
@@ -149,7 +149,7 @@ test("explicit key file takes precedence over the environment and enforces mode 
   await run.close();
   assert.equal(authorization, "Bearer private-file-key");
   chmodSync(file, 0o644);
-  const unsafe = openJev({ env: f.env, tool: "fixture", key: { file } });
+  const unsafe = openJev({ env: f.env, tool: "fixture", key: { provider: "typesafe", file } });
   assert.equal(unsafe.status().ok, false);
   const refused = unsafe.run();
   await assert.rejects(refused.ask(request("public")), /chmod 600/);
@@ -341,7 +341,7 @@ test("the gate sets the pinned wire model and refuses any other", async (t) => {
   const { model, ...unpinned } = request("public");
   assert.equal((await run.ask(unpinned)).answers.q.noul, 0.9);
   assert.equal(f.sent[0].model, model);
-  await assert.rejects(run.ask({ ...unpinned, model: "jev-0.0.1" }), /not pinned/);
+  await assert.rejects(run.ask({ ...unpinned, model: "jev-0.0.1" }), /model must be omitted or jev-1.13.0/);
   await run.close();
   assert.equal(f.sent.length, 1);
 });

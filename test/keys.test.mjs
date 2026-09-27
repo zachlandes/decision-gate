@@ -37,7 +37,7 @@ test("two keys at once book spend to separate ledgers under the per-key daily ce
     DECISION_GATE_ENDPOINT: `http://127.0.0.1:${server.address().port}/v1/systemone`,
     DECISION_GATE_PER_DAY_USD: String(perDay)
   };
-  const open = (name, tool = "fixture") => openJev({ env, tool, key: { file: path.join(dir, name) }, maxRetries: 0 });
+  const open = (name, tool = "fixture") => openJev({ env, tool, key: { provider: "typesafe", file: path.join(dir, name) }, maxRetries: 0 });
   const a = open("a", "jevzf").run(), b = open("b", "herdr-find").run();
   await Promise.all([a.ask(request("first on a")), b.ask(request("first on b"))]);
   const [refused, second] = await Promise.allSettled([a.ask(request("second on a")), b.ask(request("second on b"))]);
@@ -91,7 +91,7 @@ async function twoKeys(t, { limits = {}, hold, time } = {}) {
   const config = path.join(dir, "config.json");
   writeFileSync(config, JSON.stringify({ limits: { share: 1, ...limits } }));
   const env = { XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, DECISION_GATE_CONFIG: config, DECISION_GATE_ENDPOINT: server.url };
-  const open = (name) => openJev({ env, time, tool: "fixture", key: { file: path.join(dir, name) }, maxRetries: 0 });
+  const open = (name) => openJev({ env, time, tool: "fixture", key: { provider: "typesafe", file: path.join(dir, name) }, maxRetries: 0 });
   const jevs = { a: open("a"), b: open("b") };
   const runs = { a: jevs.a.run(), b: jevs.b.run() };
   t.after(() => Promise.all([runs.a.close(), runs.b.close()]));

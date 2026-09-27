@@ -74,7 +74,7 @@ Only then does the ask fail, with a `ServiceError` whose `status` is `429`.
 
 **It keeps under the account's rate limit before the service has to say so.**
 Requests wait for room under 80% (`limits.share`) of the account's `requests_per_minute` and `tokens_per_second`, at most 4 (`limits.in_flight`) are open at once, and a request of 32,000 tokens or more goes one at a time.
-Every key on the machine shares these limits, because TypeSafe counts them per account, not per key.
+Every TypeSafe key on the machine shares these limits, because TypeSafe counts them per account, not per key.
 
 **The same question over the same state is answered once.**
 The answer cache stores each answer's probability under a key you choose, such as the question name plus the state, and `cache.get` returns it on the next ask instead of sending the request again.
@@ -104,10 +104,29 @@ The other is a token-shaped value: a run of 16 or more characters with no spaces
 Any other value is kept, so "work authorization: F-1 OPT", "Work Authorization: US citizen", "OPT-STEM-Extension", "PermanentResident" and a posting's "Authorization: must be authorized to work" or "Authorization: Signature required on the I-9" reach the service unchanged.
 Redact text with `jev.redactor.redact` before putting it in a request.
 
-## Routes other than TypeSafe
+## Using Jev through Vercel AI Gateway
 
-decision-gate 0.1.0 sends requests to TypeSafe directly with `TYPESAFE_API_KEY`; other routes, such as AI gateways, are planned.
-Handling a `429` belongs to the gate, not the route: a `429` pauses every caller on the account and the request backs off before retrying.
+> **Experimental and unpinned.**
+> The `vercel-ai-gateway` provider sends requests through Vercel AI Gateway instead of to TypeSafe directly.
+> It sends the floating model id `typesafe-ai/jev`, not `jev-1.13.0`, so the Jev version that answers can change without notice, and thresholds tuned on `jev-1.13.0` may not hold.
+> `jev.config.pinned` is `false` for it.
+
+Choose it by name, with `"provider": "vercel-ai-gateway"` in the config or `DECISION_GATE_PROVIDER=vercel-ai-gateway`, and export `AI_GATEWAY_API_KEY`.
+The gate never picks a provider from whichever key variable happens to be set, since other tools export those keys for their own use.
+The key is sent as a Bearer token only to `https://ai-gateway.vercel.sh/typesafe/v1/systemone`, with TypeSafe's request and answer shapes, so callers change nothing else.
+A key belongs to one provider, so the gateway is never sent `TYPESAFE_API_KEY`, the top-level `key_file` or a caller's TypeSafe key; without a gateway key it refuses to send and names where one goes.
+
+Spend is booked from the answer's reported input tokens at USD 0.042 per million input tokens, output free, in the gateway's own ledger with its own daily ceiling per key.
+A `402` from the gateway fails the request with a `ServiceError` whose `status` is `402`.
+
+Requests pass through Vercel, an added party on the data path.
+
+The gateway gets its own rate window, `429` pause and in-flight requests, separate from a TypeSafe account's.
+Its defaults are conservative guesses, not measurements: 60 requests a minute and 2 in flight.
+Each ask is retried once, not twice, and a `429` without `Retry-After` pauses the gateway's callers for five seconds.
+A `429` the gate cannot avoid still fails the ask after that pause and retry.
+
+Answers cached through an unpinned provider expire within a day, because the model behind it can change without notice.
 
 ## Opening the gate
 
@@ -116,7 +135,7 @@ Handling a `429` belongs to the gate, not the route: a `429` pauses every caller
 `notice` receives one-line warnings and defaults to a no-op.
 `spend` accepts `perRunUsd` and `perDayUsd`, defaulting to the config's USD 0.02 and USD 0.20.
 The config's daily ceiling covers the key across every tool that uses it; a caller's `perDayUsd` can only lower what that tool spends, never add to the key's.
-`maxRetries` is how many times a failed request is retried, 2 by default.
+`maxRetries` is how many times a failed request is retried, 2 by default, or 1 through the gateway.
 `fetch` replaces the network for tests; the destination is still checked.
 
 The returned object holds `status()`, `config`, `redactor`, `remaining()`, `cache()` and `run()`.
@@ -124,10 +143,14 @@ The returned object holds `status()`, `config`, `redactor`, `remaining()`, `cach
 
 ## Key sources
 
-Key precedence is an explicit `key: { file }`, `{ env }` or `{ value }`, then `TYPESAFE_API_KEY`, then the config's `key_file`.
-Exactly one explicit source is allowed, and no other credential location is guessed.
+Every key belongs to one provider and is only ever sent to that provider.
+Key precedence is an explicit key for the selected provider, then that provider's key variable (`TYPESAFE_API_KEY`, or `AI_GATEWAY_API_KEY` for the gateway), then that provider's key file.
+An explicit key names its provider and exactly one source: `key: { provider: "typesafe", file }`, `{ provider, env }` or `{ provider, value }`.
+An explicit key for another provider is skipped, never sent.
+TypeSafe's key file is the config's top-level `key_file`; the gateway's is `key_file` in a `"vercel-ai-gateway"` section, such as `"vercel-ai-gateway": { "key_file": "~/.config/decision-gate/gateway-key" }`, and that section holds nothing else.
+No other credential location is guessed, and no provider falls back to another's key.
 Key files must be regular, nonempty files with mode 600.
-`jev.status()` returns `{ ok: true }` or `{ ok: false, reason }` without reading the contents of a key file; `missing: true` marks the case where no key source is configured at all.
+`jev.status()` returns `{ ok: true }` or `{ ok: false, reason }` without reading the contents of a key file; `missing: true` marks the case where the selected provider has no key source at all, and then `label` and `keyEnv` name the provider and its key variable.
 A status check cannot establish whether the service will accept a credential.
 The key is read when a request or remaining-budget lookup first needs its fingerprint, and it is never enumerable, logged or stored.
 
@@ -139,6 +162,7 @@ No file is required.
 
 ```json
 {
+  "provider": "typesafe",
   "key_file": "~/.config/decision-gate/key",
   "never_send_file": "~/.config/decision-gate/never-send.json",
   "spend": { "per_run_usd": 0.02, "per_day_usd": 0.2 },
@@ -151,9 +175,10 @@ No file is required.
 }
 ```
 
-`DECISION_GATE_PER_RUN_USD`, `DECISION_GATE_PER_DAY_USD`, `DECISION_GATE_RPM`, `DECISION_GATE_TPS`, `DECISION_GATE_IN_FLIGHT` and `DECISION_GATE_NEVER_SEND_FILE` override the corresponding config values.
+`provider` is `typesafe` (the default) or `vercel-ai-gateway`; anything else is refused.
+`DECISION_GATE_PROVIDER`, `DECISION_GATE_PER_RUN_USD`, `DECISION_GATE_PER_DAY_USD`, `DECISION_GATE_RPM`, `DECISION_GATE_TPS`, `DECISION_GATE_IN_FLIGHT` and `DECISION_GATE_NEVER_SEND_FILE` override the corresponding config values.
 Relative paths in the file resolve beside it, and `~/` works.
-Every tool reads the same limits section and daily ceiling; an explicit caller per-run ceiling remains the caller's own.
+Every tool reads the same limits and daily ceiling; an explicit caller per-run ceiling remains the caller's own.
 
 ## Accounts and rate limits
 
@@ -161,17 +186,21 @@ TypeSafe counts rate limits per account, not per key.
 A second key on the same account adds no capacity: measured on one account, small requests got about 47,000-56,000 tokens a second on one key and 46,000 combined on two, and large ones about 121,000 on one and 127,000 split across two.
 A key per tool is for separate spend records and revocation, not for throughput.
 
-A key does not reveal its account, so the gate assumes every key on this machine belongs to one account.
-Every key shares that account's one rate window, one 429 pause and one set of in-flight requests, across every tool and process on the machine.
+A key does not reveal its account, so the gate assumes every TypeSafe key on this machine belongs to one account.
+Every TypeSafe key shares that account's one rate window, one 429 pause and one set of in-flight requests, across every tool and process on the machine.
 
 `limits` describes the account's ceiling:
 
 - `requests_per_minute` and `tokens_per_second` are TypeSafe's published limits for the pinned model; the gate keeps to `share` of both.
 - `in_flight` is how many requests the account may have open at once, 4 by default.
 
+Those defaults are TypeSafe's, and the unsectioned keys apply to the `typesafe` provider only.
+The gateway keeps its own defaults, 60 requests a minute and 2 in flight, whatever the unsectioned keys say.
+A section named after a provider, such as `"limits": { "vercel-ai-gateway": { "in_flight": 1 } }`, applies only to that provider and wins over its defaults and, for `typesafe`, over the unsectioned keys; the `DECISION_GATE_*` variables win over all of them.
+
 Only one large request, estimated at 32,000 tokens or more, is open at a time; that is fixed, not configured.
 
-The defaults are measured: requests of about 6,100 tokens finished fastest with two to four in flight, and requests of about 50,000 tokens finished as fast one at a time as two or four at once.
+TypeSafe's `in_flight` default is measured: requests of about 6,100 tokens finished fastest with two to four in flight, and requests of about 50,000 tokens finished as fast one at a time as two or four at once.
 A tool that sends requests in parallel should size its pool from `jev.config.limits.inFlight` instead of keeping its own setting, since the gate holds any extra requests until a slot frees.
 
 ## Runs
@@ -184,6 +213,7 @@ await run.close();
 ```
 
 `capUsd` can lower the per-run ceiling, never raise it.
+A request's `model` may be omitted or `PINNED_MODEL`, for either provider; the gate sends the provider's own model id, and refuses any other value.
 Raw requests are checked, not silently rewritten: a forbidden value in any serialized field or its decoded JSON form prevents the request.
 Callers that send user text redact it first with `jev.redactor.redact`, and `jev.redactor.check(body)` runs the same final check on a serialized request before anything is queued.
 `jev.redactor.clean(text)` is true when one piece of text would pass that check as a string in a request: nothing forbidden survives in it and the built-in rules would leave it unchanged.
@@ -211,7 +241,8 @@ The estimate is not exact, so a request close to either budget can still be reje
 Use `describeError` for a safe diagnostic instead of logging a transport exception or provider response body.
 The errors it passes through are `ConfigError`, `ServiceError` (with the HTTP `status`), `SpendCapError`, `RedactionError`, `RequestSizeError` and `StateError`; none carries request text.
 
-`PINNED_MODEL`, `MAX_INPUT_TOKENS`, `MAX_STATE_QUESTION_TOKENS`, `usdFor(tokens)` and `estimateUsd(bytes)` describe the pinned model's request limits and price.
+`PINNED_MODEL`, `MAX_INPUT_TOKENS`, `MAX_STATE_QUESTION_TOKENS`, `usdFor(tokens)` and `estimateUsd(bytes)` describe the pinned model's request limits and price, which the gate also books for the gateway.
+`jev.config.provider`, `jev.config.model` and `jev.config.pinned` say which provider and model id a caller's requests go to, and whether that model is pinned.
 `estimateUsd` uses the measured rate of about a quarter token per byte, for figures shown before a run; it is not a reservation.
 
 ## Answer cache
@@ -226,7 +257,7 @@ The cache stores probabilities under caller-supplied string keys, and never the 
 Each key is stored as an HMAC under a private random key, so short keys such as source lines cannot be guessed from the stored hashes.
 Entries are filed by the caller's `scope` together with the provider, model, endpoint and never-send list, so changing any of them starts a fresh file.
 Entries hold only key hashes, probabilities and times.
-They expire after 30 days, a file mostly made of expired or superseded rows is rewritten on its next write, and files are evicted to keep the cache within 50 MiB.
+They expire after 30 days, or a day for an unpinned provider; a file mostly made of expired or superseded rows is rewritten on its next write, and files are evicted to keep the cache within 50 MiB.
 A cache that cannot be read or written warns once through `notice` and continues without caching, not without spend accounting.
 
 ## Request ownership and persisted state
@@ -241,6 +272,7 @@ A retry after an attempt that may have been billed reserves afresh without waiti
 A retry that waits out the rate window past its timeout is a timeout the SDK may retry.
 Redirects are never followed.
 A 429 or 529 records a pause for the whole account using the server's Retry-After delay, or a short fallback when absent, before SDK retry handling continues.
+Each provider has one hard-coded destination, and no configuration can add another.
 For tests only, `DECISION_GATE_ENDPOINT` may point at an HTTP URL on `127.0.0.1` or `::1`; any other host is refused.
 
 State lives under `$XDG_STATE_HOME/decision-gate`, normally `~/.local/state/decision-gate`, and the cache under `$XDG_CACHE_HOME/decision-gate/answers`:
@@ -250,11 +282,13 @@ State lives under `$XDG_STATE_HOME/decision-gate`, normally `~/.local/state/deci
 | `cache-key` | The answer cache's private hash key |
 | `spend/typesafe/<key-fingerprint>.jsonl` | The cost ledger: tool, time, hold and cost of each run, never text |
 | `limits/typesafe/accounts/default.json` | The account's shared rate window, pause and in-flight requests |
+| `spend/vercel-ai-gateway/<key-fingerprint>.jsonl` | The same ledger for gateway keys |
+| `limits/vercel-ai-gateway/accounts/default.json` | The gateway's own rate window, pause and in-flight requests |
 
 The fingerprint is the first 16 SHA-256 hex characters, never the key.
 Rate requests use a rolling minute window; tokens use a rolling second window, counting each request at its size in bytes, up to the request limit.
 Measured usage is about a quarter token per byte, so this overcounts; the spend ceiling, not the limiter, is the guaranteed bound.
-The defaults enforce 960 requests a minute and 200,000 reserved tokens a second.
+The TypeSafe defaults enforce 960 requests a minute and 200,000 reserved tokens a second.
 An in-flight request whose process stopped without releasing it is dropped once that process is gone, or after two minutes without an attempt.
 If the limiter's directory cannot be written, it warns once per limiter and uses in-process limits.
 This does not disable the daily ceiling: unwritable spend state still refuses paid requests.
@@ -277,8 +311,8 @@ This can refuse a very small allowance even when a displayed estimate is lower.
 
 ## Providers and dependency review
 
-Only native TypeSafe is implemented.
-A provider keeps its name, key variable, pinned model, price, endpoint and SDK responder together, and its state is filed under its name, so adding one needs no migration.
+Native TypeSafe and, experimentally, Vercel AI Gateway are implemented; both speak TypeSafe's API through the same SDK responder.
+A provider keeps its name, key variable, model id and whether it is pinned, price, endpoint, limit defaults and retry settings together, and its state is filed under its name, so adding one needs no migration.
 Another provider needs a known price, where zero counts for a local model, and comparable typed probabilities before it can support these ceilings and callers' thresholds.
 
 The pinned `@typesafe-ai/sdk` version is 0.6.0, with no runtime dependencies or install hooks.
