@@ -14,18 +14,18 @@
     ".": "./lib/index.mjs"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "lint": "for f in $(find lib test -name '*.mjs'); do node --check \"$f\" || exit 1; done"
   },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zachlandes/jevzf.git",
-    "directory": "packages/decision-gate"
+    "url": "git+https://github.com/zachlandes/decision-gate.git"
   },
   "bugs": {
-    "url": "https://github.com/zachlandes/jevzf/issues"
+    "url": "https://github.com/zachlandes/decision-gate/issues"
   },
-  "homepage": "https://github.com/zachlandes/jevzf/tree/main/packages/decision-gate#readme",
+  "homepage": "https://github.com/zachlandes/decision-gate#readme",
   "keywords": [
     "jev",
     "typesafe",
