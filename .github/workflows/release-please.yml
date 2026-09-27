@@ -1,0 +1,55 @@
+name: Release please
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Publish here rather than on a tag-push workflow, because releases made
+  # with GITHUB_TOKEN do not trigger other workflows. npm's trusted publisher
+  # is bound to this file name, so renaming it breaks publishing
+  npm-publish:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          # npm advises against caching in release builds
+          package-manager-cache: false
+      # Trusted publishing needs npm 11.5.1 or later; Node 24 bundles it
+      - name: Check npm supports trusted publishing
+        run: |
+          node -e '
+            const [maj, min, pat] = process.argv[1].split(".").map(Number)
+            const ok = maj > 11 || (maj === 11 && (min > 5 || (min === 5 && pat >= 1)))
+            if (!ok) { console.error("npm " + process.argv[1] + " is older than 11.5.1"); process.exit(1) }
+          ' "$(npm --version)"
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - run: npm publish --provenance --access public
