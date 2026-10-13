@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { openJev, PINNED_MODEL, MAX_INPUT_TOKENS, usdFor, describeError } from "../lib/index.mjs";
 
@@ -160,6 +161,33 @@ test("a pause recorded while eligibility is being checked delays the send and re
   assert.equal(limits.starts.length, 2);
   assert.ok(limits.starts.at(-1).at >= paused + 5000);
 });
+
+for (const [name, lockedChecks] of Object.entries({ refreshed: 1, refused: 2 })) {
+  test(`eligibility that expires while waiting for the limiter's lock is ${name}`, async (t) => {
+    let now = Date.UTC(2026, 9, 13, 18), lock, heldUntil = 0, checks = 0;
+    const time = { now: () => now, sleep: async (ms) => {
+      now += ms;
+      if (lock && now >= heldUntil) { rmSync(lock, { recursive: true, force: true }); lock = undefined; }
+    } };
+    const f = setup(t, { catalog: () => {
+      // Another live process holds the limiter's lock for a second past this check's last fresh moment
+      if (++checks <= lockedChecks) {
+        lock = path.join(f.dir, "decision-gate/limits/openrouter/accounts/default.json.lock");
+        mkdirSync(lock);
+        writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ host: hostname(), pid: 1, token: randomUUID() }));
+        heldUntil = now + 1000;
+      }
+      return new Response(JSON.stringify({ data: [eligible()] }), { headers: { date: new Date(now - 59500).toUTCString() } });
+    } });
+    const run = f.open({ time }).run();
+    const asked = run.ask(request());
+    if (lockedChecks === 1) await asked;
+    else await assert.rejects(asked, /eligibility expired before sending/);
+    await run.close();
+    assert.deepEqual(f.sent.map(({ url }) => url), lockedChecks === 1 ? [CATALOG, CATALOG, ENDPOINT] : [CATALOG, CATALOG]);
+    assert.equal(run.summary().committed_usd, lockedChecks === 1 ? usdFor(275) : 0);
+  });
+}
 
 test("metadata, logging, plugins, fallback models and unknown fields cannot reach OpenRouter", async (t) => {
   for (const [key, value] of Object.entries({ metadata: { logging: true }, models: ["other"], plugins: [{ id: "broadcast" }], route: "fallback", log: true, usage: { include: true } })) {

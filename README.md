@@ -153,6 +153,7 @@ It requires exactly one TypeSafe endpoint for this model, named `TypeSafe | type
 It refuses missing, changed, ambiguous, unreadable or unavailable eligibility, redirects, undated responses and catalogs older than 60 seconds by HTTP Date or Age; at most five seconds of future server clock skew is accepted.
 A retry cannot reuse a previous attempt's catalog check.
 After the check, the attempt is confirmed against the account's pause and rate window at the moment it is sent; if another caller recorded a pause meanwhile, it waits that out and checks the catalog again.
+If the check goes stale during that confirmation, such as while waiting for another process's lock on the shared limiter state, the catalog is fetched once more and the attempt is refused if it goes stale again.
 These are eligibility and routing checks, not an independent ZDR receipt from the service.
 [OpenRouter's ZDR policy](https://openrouter.ai/docs/guides/features/zdr) documents per-request `provider.zdr` and notes that OpenRouter itself does not retain prompts unless prompt logging is opted into.
 Do not opt into account-level prompt logging when using this route; request fields cannot undo an account opt-in.
