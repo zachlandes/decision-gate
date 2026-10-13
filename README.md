@@ -1,7 +1,7 @@
 # decision-gate
 
 > **Pre-1.0.**
-> This is 0.1.0: the interface may change, and a breaking change raises the minor version.
+> This is 0.2.0: the interface may change, and a breaking change raises the minor version.
 > Unofficial; not affiliated with TypeSafe.
 
 Built with Claude Code.
@@ -303,7 +303,7 @@ The estimate is not exact, so a request close to either budget can still be reje
 Use `describeError` for a safe diagnostic instead of logging a transport exception or provider response body.
 The errors it passes through are `ConfigError`, `ServiceError` (with the HTTP `status`), `SpendCapError`, `RedactionError`, `RequestSizeError` and `StateError`; none carries request text.
 
-`PINNED_MODEL`, `MAX_INPUT_TOKENS`, `MAX_STATE_QUESTION_TOKENS`, `usdFor(tokens)` and `estimateUsd(bytes)` describe the pinned model's request limits and price, which the gate also books for the gateway.
+`PINNED_MODEL`, `MAX_INPUT_TOKENS`, `MAX_STATE_QUESTION_TOKENS`, `usdFor(tokens)` and `estimateUsd(bytes)` describe the pinned model's request limits and price, which the gate also books for the gateway and OpenRouter.
 `jev.config.provider`, `jev.config.model` and `jev.config.pinned` say which provider and model id a caller's requests go to, and whether that model is pinned.
 `estimateUsd` uses the measured rate of about a quarter token per byte, for figures shown before a run; it is not a reservation.
 
@@ -348,6 +348,8 @@ State lives under `$XDG_STATE_HOME/decision-gate`, normally `~/.local/state/deci
 | `limits/typesafe/accounts/default.json` | The account's shared rate window, pause and in-flight requests |
 | `spend/vercel-ai-gateway/<key-fingerprint>.jsonl` | The same ledger for gateway keys |
 | `limits/vercel-ai-gateway/accounts/default.json` | The gateway's own rate window, pause and in-flight requests |
+| `spend/openrouter/<key-fingerprint>.jsonl` | The same ledger for OpenRouter keys |
+| `limits/openrouter/accounts/default.json` | OpenRouter's own rate window, pause and in-flight requests |
 
 The fingerprint is the first 16 SHA-256 hex characters, never the key.
 Rate requests use a rolling minute window; tokens use a rolling second window, counting each request at its size in bytes, up to the request limit.
