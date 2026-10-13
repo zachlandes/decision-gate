@@ -1,7 +1,7 @@
 # decision-gate
 
 > **Pre-1.0.**
-> This is 0.1.0: the interface may change, and a breaking change raises the minor version.
+> This is 0.2.0: the interface may change, and a breaking change raises the minor version.
 > Unofficial; not affiliated with TypeSafe.
 
 Built with Claude Code.
@@ -89,14 +89,14 @@ It also does not merge two identical asks started at the same moment, so check t
 **A daily spend ceiling per key.**
 Every tool on the machine that uses the same key shares one daily ceiling, `spend.per_day_usd` (USD 0.20 by default, reset at UTC midnight), and each run has its own ceiling, `spend.per_run_usd` (USD 0.02 by default).
 A request that does not fit under them is not sent, and the ask fails with a `SpendCapError`.
-At the price 0.1.0 records for the pinned model, USD 0.042 per million input tokens with output free, the default daily ceiling covers about 4.7 million input tokens; raise it in the config for more.
+At the recorded price for the pinned model, USD 0.042 per million input tokens with output free, the default daily ceiling covers about 4.7 million input tokens; raise it in the config for more.
 The default run ceiling covers about 476,000, so a long screening job opens a run per batch or raises `per_run_usd` in the config too.
 
 **Several questions over one state go in one call.**
 A Jev request carries one `state` and any number of named `questions`, and the gate sends it as one request: one rate-limit slot, and the state's input tokens paid once however many questions it asks.
 When the state is most of the request, as a job posting usually is, three questions in one call cost little more than one, and use a third of the requests.
 
-**Nothing on the never-send list leaves the machine.**
+**Nothing forbidden by the run's never-send policy leaves the machine.**
 Every request is checked, including each retry, and one containing a forbidden value is refused with a `RedactionError` rather than rewritten.
 The built-in rules cover known secret formats and email addresses.
 They also rewrite the value after an `authorization`, `proxy-authorization` or `auth` key, as a header, a JSON or YAML key or a parameter, in only two shapes.
@@ -130,6 +130,64 @@ A `429` the gate cannot avoid still fails the ask after that pause and retry.
 
 Answers cached through an unpinned provider expire within a day, because the model behind it can change without notice.
 
+## Using Jev through OpenRouter with zero data retention
+
+Choose `DECISION_GATE_PROVIDER=openrouter` (or `"provider": "openrouter"` in config) and supply `OPENROUTER_API_KEY`.
+The fixed destination is `https://openrouter.ai/api/v1/systemone`, the [documented TypeSafe SDK surface](https://openrouter.ai/docs/guides/community/typesafe-sdk), not chat completions.
+The gate sends `typesafe/jev-1.13` and accepts only that response model or `typesafe/jev-1.13-20260917`, with response provider `TypeSafe`.
+It validates Noul, Choice and Score answers against the requested question names, types and criteria before returning them.
+Vercel's floating model is not this route.
+
+Every OpenRouter attempt, including retries, forces these provider preferences:
+
+```json
+{ "zdr": true, "data_collection": "deny", "allow_fallbacks": false, "only": ["typesafe"] }
+```
+
+A request carrying its own `provider` field is refused before anything is sent, whatever it holds; the gate adds the preferences above itself.
+Only `model`, `state` and `questions` are accepted as top-level request fields; metadata, plugins, logging, fallback models and other passthrough fields are refused.
+Questions accept only `type`, `instructions` and `criteria`.
+
+Immediately before each paid attempt, after rate/spend waits, the gate fetches the public [ZDR endpoint catalog](https://openrouter.ai/api/v1/endpoints/zdr) without credentials or local caching.
+It requires exactly one TypeSafe endpoint for this model, named `TypeSafe | typesafe/jev-1.13-20260917`, with the expected provider tag, price and context limits.
+It refuses missing, changed, ambiguous, unreadable or unavailable eligibility, redirects, undated responses and catalogs older than 60 seconds by HTTP Date or Age; at most five seconds of future server clock skew is accepted.
+A retry cannot reuse a previous attempt's catalog check.
+After the check, the attempt is confirmed against the account's pause and rate window at the moment it is sent; if another caller recorded a pause meanwhile, it waits that out and checks the catalog again.
+If the check goes stale during that confirmation, such as while waiting for another process's lock on the shared limiter state, the catalog is fetched once more and the attempt is refused if it goes stale again.
+These are eligibility and routing checks, not an independent ZDR receipt from the service.
+[OpenRouter's ZDR policy](https://openrouter.ai/docs/guides/features/zdr) documents per-request `provider.zdr` and notes that OpenRouter itself does not retain prompts unless prompt logging is opted into.
+Do not opt into account-level prompt logging when using this route; request fields cannot undo an account opt-in.
+
+The default never-send policy still blocks email, even on OpenRouter.
+Every OpenRouter run, default or ZDR-scoped, also refuses anything shaped like an OpenRouter key (`sk-or-v1-…`, in any case), not only the configured one.
+To allow customer contact values unchanged, opt into one run, not a global redaction switch:
+
+```js
+const run = jev.run({ customerValues: "zdr" });
+try {
+  const result = await run.ask({
+    state: { name: "Example Person", email: "example@example.test" },
+    questions: { mentioned: { type: "noul", instructions: "Was an email provided?" } }
+  });
+} finally {
+  await run.close();
+}
+```
+
+`customerValues: "zdr"` is refused for every other provider.
+Inside that run, the built-in email prohibition is omitted; credential checks (including OpenRouter-format keys and the route's actual key) and custom forbidden patterns remain enforced.
+Names, addresses and ordinary phone numbers are not universally blocked by the built-in policy in the first place.
+The public `jev.redactor` remains the default never-send redactor; do not pre-redact contact values intended for the explicitly scoped run.
+A later default run on the same client still refuses email.
+
+OpenRouter has its own key files, spend ledger, rate window and pauses, never another provider's key or fallback.
+Use `"openrouter": { "key_file": "~/.config/decision-gate/openrouter-key" }` for its config key file, or `key: { provider: "openrouter", value }` for a private in-memory credential.
+Its conservative rate defaults are 60 requests/minute, 250,000 tokens/second and 2 in flight; these are not measured OpenRouter account limits.
+Its catalog reports 64,000 whole-request tokens and 32,000 state-plus-question tokens, which the gate estimates before sending.
+Spend remains conservatively reserved at the existing 65,536-token bound and booked at USD 0.042 per million reported input tokens, output free, not from caller metadata or an arbitrary response cost.
+`DECISION_GATE_ENDPOINT` overrides are refused for OpenRouter, including loopback; use injected `fetch` for offline tests.
+No credential or inference call is needed to run the tests.
+
 ## Opening the gate
 
 `openJev({ tool, key, neverSend, spend, maxRetries, env, notice, fetch })` opens a caller.
@@ -137,6 +195,7 @@ Answers cached through an unpinned provider expire within a day, because the mod
 `notice` receives one-line warnings and defaults to a no-op.
 `spend` accepts `perRunUsd` and `perDayUsd`, defaulting to the config's USD 0.02 and USD 0.20.
 The config's daily ceiling covers the key across every tool that uses it; a caller's `perDayUsd` can only lower what that tool spends, never add to the key's.
+Each run defaults to `customerValues: "never-send"`; only OpenRouter permits the explicit `customerValues: "zdr"` run scope described above.
 `maxRetries` is how many times a failed request is retried, 2 by default, or 1 through the gateway.
 `fetch` replaces the network for tests; the destination is still checked.
 
@@ -146,7 +205,7 @@ The returned object holds `status()`, `config`, `redactor`, `remaining()`, `cach
 ## Key sources
 
 Every key belongs to one provider and is only ever sent to that provider.
-Key precedence is an explicit key for the selected provider, then that provider's key variable (`TYPESAFE_API_KEY`, or `AI_GATEWAY_API_KEY` for the gateway), then that provider's key file.
+Key precedence is an explicit key for the selected provider, then that provider's key variable (`TYPESAFE_API_KEY`, `AI_GATEWAY_API_KEY` or `OPENROUTER_API_KEY`), then that provider's key file.
 An explicit key names its provider and exactly one source: `key: { provider: "typesafe", file }`, `{ provider, env }` or `{ provider, value }`.
 An explicit key for another provider is skipped, never sent.
 TypeSafe's key file is the config's top-level `key_file`; the gateway's is `key_file` in a `"vercel-ai-gateway"` section, such as `"vercel-ai-gateway": { "key_file": "~/.config/decision-gate/gateway-key" }`, and that section holds nothing else.
@@ -177,7 +236,7 @@ No file is required.
 }
 ```
 
-`provider` is `typesafe` (the default) or `vercel-ai-gateway`; anything else is refused.
+`provider` is `typesafe` (the default), `vercel-ai-gateway` or `openrouter`; anything else is refused.
 `DECISION_GATE_PROVIDER`, `DECISION_GATE_PER_RUN_USD`, `DECISION_GATE_PER_DAY_USD`, `DECISION_GATE_RPM`, `DECISION_GATE_TPS`, `DECISION_GATE_IN_FLIGHT` and `DECISION_GATE_NEVER_SEND_FILE` override the corresponding config values.
 Relative paths in the file resolve beside it, and `~/` works.
 Every tool reads the same limits and daily ceiling; an explicit caller per-run ceiling remains the caller's own.
@@ -215,7 +274,8 @@ await run.close();
 ```
 
 `capUsd` can lower the per-run ceiling, never raise it.
-A request's `model` may be omitted or `PINNED_MODEL`, for either provider; the gate sends the provider's own model id, and refuses any other value.
+A request's `model` may be omitted or `PINNED_MODEL` for any provider.
+The gate sends the provider's own model id and refuses any other value.
 Raw requests are checked, not silently rewritten: a forbidden value in any serialized field or its decoded JSON form prevents the request.
 Callers that send user text redact it first with `jev.redactor.redact`, and `jev.redactor.check(body)` runs the same final check on a serialized request before anything is queued.
 `jev.redactor.clean(text)` is true when one piece of text would pass that check as a string in a request: nothing forbidden survives in it and the built-in rules would leave it unchanged.
@@ -243,7 +303,7 @@ The estimate is not exact, so a request close to either budget can still be reje
 Use `describeError` for a safe diagnostic instead of logging a transport exception or provider response body.
 The errors it passes through are `ConfigError`, `ServiceError` (with the HTTP `status`), `SpendCapError`, `RedactionError`, `RequestSizeError` and `StateError`; none carries request text.
 
-`PINNED_MODEL`, `MAX_INPUT_TOKENS`, `MAX_STATE_QUESTION_TOKENS`, `usdFor(tokens)` and `estimateUsd(bytes)` describe the pinned model's request limits and price, which the gate also books for the gateway.
+`PINNED_MODEL`, `MAX_INPUT_TOKENS`, `MAX_STATE_QUESTION_TOKENS`, `usdFor(tokens)` and `estimateUsd(bytes)` describe the pinned model's request limits and price, which the gate also books for the gateway and OpenRouter.
 `jev.config.provider`, `jev.config.model` and `jev.config.pinned` say which provider and model id a caller's requests go to, and whether that model is pinned.
 `estimateUsd` uses the measured rate of about a quarter token per byte, for figures shown before a run; it is not a reservation.
 
@@ -271,11 +331,13 @@ The slot is held until the request settles, across the SDK's retries.
 Its fetch wrapper checks the exact body, reserves the attempt against the run's ceiling, counts it in the account's rate window and persists the reservation before every network attempt, including retries.
 A refusal known not to be billed, such as a 429, hands its reservation to the retry, so the retry needs no new room.
 A retry after an attempt that may have been billed reserves afresh without waiting; if it does not fit, that request fails as a service error, and only booked plus held spend reaching the ceiling stops a run at its ceiling.
+Each attempt is confirmed against the account's pause and window again at the moment it is sent, and restamped then, so a pause another caller recorded after admission still holds it back.
 A retry that waits out the rate window past its timeout is a timeout the SDK may retry.
 Redirects are never followed.
 A 429 or 529 records a pause for the whole account using the server's Retry-After delay, or a short fallback when absent, before SDK retry handling continues.
 Each provider has one hard-coded destination, and no configuration can add another.
-For tests only, `DECISION_GATE_ENDPOINT` may point at an HTTP URL on `127.0.0.1` or `::1`; any other host is refused.
+For TypeSafe and Vercel tests only, `DECISION_GATE_ENDPOINT` may point at an HTTP URL on `127.0.0.1` or `::1`; any other host is refused.
+OpenRouter refuses all endpoint overrides.
 
 State lives under `$XDG_STATE_HOME/decision-gate`, normally `~/.local/state/decision-gate`, and the cache under `$XDG_CACHE_HOME/decision-gate/answers`:
 
@@ -286,6 +348,8 @@ State lives under `$XDG_STATE_HOME/decision-gate`, normally `~/.local/state/deci
 | `limits/typesafe/accounts/default.json` | The account's shared rate window, pause and in-flight requests |
 | `spend/vercel-ai-gateway/<key-fingerprint>.jsonl` | The same ledger for gateway keys |
 | `limits/vercel-ai-gateway/accounts/default.json` | The gateway's own rate window, pause and in-flight requests |
+| `spend/openrouter/<key-fingerprint>.jsonl` | The same ledger for OpenRouter keys |
+| `limits/openrouter/accounts/default.json` | OpenRouter's own rate window, pause and in-flight requests |
 
 The fingerprint is the first 16 SHA-256 hex characters, never the key.
 Rate requests use a rolling minute window; tokens use a rolling second window, counting each request at its size in bytes, up to the request limit.
@@ -313,7 +377,9 @@ This can refuse a very small allowance even when a displayed estimate is lower.
 
 ## Providers and dependency review
 
-Native TypeSafe and, experimentally, Vercel AI Gateway are implemented; both speak TypeSafe's API through the same SDK responder.
+Native TypeSafe, experimental Vercel AI Gateway and pinned ZDR-enforced OpenRouter are implemented; all speak TypeSafe's API through the same SDK responder.
+OpenRouter extends that owner with request-policy, catalog-eligibility and typed-response validation hooks.
+The public OpenRouter [SDK surface](https://openrouter.ai/docs/guides/community/typesafe-sdk), [routing fields](https://openrouter.ai/docs/guides/routing/provider-selection), [ZDR policy and catalog](https://openrouter.ai/docs/guides/features/zdr) and [model endpoint catalog](https://openrouter.ai/api/v1/models/typesafe/jev-1.13/endpoints) were checked on 2026-10-13.
 A provider keeps its name, key variable, model id and whether it is pinned, price, endpoint, limit defaults and retry settings together, and its state is filed under its name, so adding one needs no migration.
 Another provider needs a known price, where zero counts for a local model, and comparable typed probabilities before it can support these ceilings and callers' thresholds.
 
