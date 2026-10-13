@@ -156,6 +156,22 @@ test("explicit key file takes precedence over the environment and enforces mode 
   await refused.close();
 });
 
+test("an attempt held past the rate window by a long pause is still confirmed at send", async (t) => {
+  const f = setup(t);
+  let now = 100000;
+  const time = { now: () => now, sleep: async (ms) => { now += ms; } };
+  const limiter = createLimiter({ dir: f.dir, limits: { requestsPerMinute: 10, tokensPerSecond: 100, share: 1, inFlight: 4, largeInFlight: 1, largeRequestTokens: 32000 }, time });
+  const slot = await limiter.take(40);
+  await limiter.pause(90000);
+  assert.equal(await slot.confirm(), 90000);
+  now += 90000;
+  await (await limiter.take(10)).release();
+  assert.equal(await slot.confirm(), 0);
+  const state = JSON.parse(readFileSync(path.join(f.dir, "accounts/default.json"), "utf8"));
+  assert.deepEqual(state.starts.map(({ at, tokens }) => [at, tokens]), [[190000, 10], [190000, 40]]);
+  await slot.release();
+});
+
 test("separate processes share one limiter window for the account", async (t) => {
   const f = setup(t);
   const script = `
