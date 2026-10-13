@@ -144,19 +144,21 @@ Every OpenRouter attempt, including retries, forces these provider preferences:
 { "zdr": true, "data_collection": "deny", "allow_fallbacks": false, "only": ["typesafe"] }
 ```
 
-Caller provider preferences are replaced, not merged.
-Only `model`, `state`, `questions` and `provider` are accepted as top-level request fields; metadata, plugins, logging, fallback models and other passthrough fields are refused.
+A request carrying its own `provider` field is refused before anything is sent, whatever it holds; the gate adds the preferences above itself.
+Only `model`, `state` and `questions` are accepted as top-level request fields; metadata, plugins, logging, fallback models and other passthrough fields are refused.
 Questions accept only `type`, `instructions` and `criteria`.
 
 Immediately before each paid attempt, after rate/spend waits, the gate fetches the public [ZDR endpoint catalog](https://openrouter.ai/api/v1/endpoints/zdr) without credentials or local caching.
 It requires exactly one TypeSafe endpoint for this model, named `TypeSafe | typesafe/jev-1.13-20260917`, with the expected provider tag, price and context limits.
 It refuses missing, changed, ambiguous, unreadable or unavailable eligibility, redirects, undated responses and catalogs older than 60 seconds by HTTP Date or Age; at most five seconds of future server clock skew is accepted.
 A retry cannot reuse a previous attempt's catalog check.
+After the check, the attempt is confirmed against the account's pause and rate window at the moment it is sent; if another caller recorded a pause meanwhile, it waits that out and checks the catalog again.
 These are eligibility and routing checks, not an independent ZDR receipt from the service.
 [OpenRouter's ZDR policy](https://openrouter.ai/docs/guides/features/zdr) documents per-request `provider.zdr` and notes that OpenRouter itself does not retain prompts unless prompt logging is opted into.
 Do not opt into account-level prompt logging when using this route; request fields cannot undo an account opt-in.
 
 The default never-send policy still blocks email, even on OpenRouter.
+Every OpenRouter run, default or ZDR-scoped, also refuses anything shaped like an OpenRouter key (`sk-or-v1-…`, in any case), not only the configured one.
 To allow customer contact values unchanged, opt into one run, not a global redaction switch:
 
 ```js
@@ -172,7 +174,7 @@ try {
 ```
 
 `customerValues: "zdr"` is refused for every other provider.
-Inside that run, the built-in email prohibition is omitted; credential checks (including OpenRouter keys and the route's actual key) and custom forbidden patterns remain enforced.
+Inside that run, the built-in email prohibition is omitted; credential checks (including OpenRouter-format keys and the route's actual key) and custom forbidden patterns remain enforced.
 Names, addresses and ordinary phone numbers are not universally blocked by the built-in policy in the first place.
 The public `jev.redactor` remains the default never-send redactor; do not pre-redact contact values intended for the explicitly scoped run.
 A later default run on the same client still refuses email.
@@ -271,7 +273,7 @@ await run.close();
 ```
 
 `capUsd` can lower the per-run ceiling, never raise it.
-A request's `model` may be omitted or `PINNED_MODEL` for any provider; OpenRouter also accepts its pinned wire id `typesafe/jev-1.13`.
+A request's `model` may be omitted or `PINNED_MODEL` for any provider.
 The gate sends the provider's own model id and refuses any other value.
 Raw requests are checked, not silently rewritten: a forbidden value in any serialized field or its decoded JSON form prevents the request.
 Callers that send user text redact it first with `jev.redactor.redact`, and `jev.redactor.check(body)` runs the same final check on a serialized request before anything is queued.
@@ -328,6 +330,7 @@ The slot is held until the request settles, across the SDK's retries.
 Its fetch wrapper checks the exact body, reserves the attempt against the run's ceiling, counts it in the account's rate window and persists the reservation before every network attempt, including retries.
 A refusal known not to be billed, such as a 429, hands its reservation to the retry, so the retry needs no new room.
 A retry after an attempt that may have been billed reserves afresh without waiting; if it does not fit, that request fails as a service error, and only booked plus held spend reaching the ceiling stops a run at its ceiling.
+Each attempt is confirmed against the account's pause and window again at the moment it is sent, and restamped then, so a pause another caller recorded after admission still holds it back.
 A retry that waits out the rate window past its timeout is a timeout the SDK may retry.
 Redirects are never followed.
 A 429 or 529 records a pause for the whole account using the server's Retry-After delay, or a short fallback when absent, before SDK retry handling continues.

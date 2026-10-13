@@ -82,7 +82,7 @@ for (const status of [429, 503]) {
     let attempts = 0;
     const f = setup(t, { answer: () => ++attempts === 1 ? new Response("private upstream error", { status, headers: { "retry-after-ms": "1" } }) : response() });
     const run = f.open({ maxRetries: 1 }).run({ customerValues: "zdr" });
-    const body = { ...request({ name: "Example Person", email: "example@example.test" }), model: PINNED_MODEL, provider: { zdr: false, data_collection: "allow", allow_fallbacks: true, only: ["other"], order: ["other"], metadata: { logging: true } } };
+    const body = { ...request({ name: "Example Person", email: "example@example.test" }), model: PINNED_MODEL };
     await run.ask(body);
     await run.close();
     assert.deepEqual(f.sent.map(({ url }) => url), [CATALOG, ENDPOINT, CATALOG, ENDPOINT]);
@@ -125,6 +125,40 @@ test("an abort during catalog verification never becomes a paid attempt", async 
   await run.close();
   assert.deepEqual(f.sent.map(({ url }) => url), [CATALOG]);
   assert.equal(run.summary().committed_usd, 0);
+});
+
+test("caller provider preferences are refused rather than replaced", async (t) => {
+  for (const provider of [{ zdr: false, data_collection: "allow", allow_fallbacks: true, only: ["other"], order: ["other"] }, policy, null]) {
+    const f = setup(t);
+    await assert.rejects(ask(f.open(), { ...request(), provider }, { customerValues: "zdr" }), /own ZDR provider preferences; remove the request's provider field/);
+    assert.equal(f.sent.length, 0);
+  }
+});
+
+test("a pause recorded while eligibility is being checked delays the send and repeats the check", async (t) => {
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  let checks = 0;
+  const f = setup(t, {
+    catalog: async () => {
+      if (++checks === 1) await held;
+      return new Response(JSON.stringify({ data: [eligible()] }), { headers: { date: new Date(f.time.now()).toUTCString() } });
+    },
+    answer: ({ sent }) => sent.filter(({ url }) => url === ENDPOINT).length === 1 ? new Response("private error", { status: 429, headers: { "retry-after": "5" } }) : response()
+  });
+  const run = f.open().run();
+  const first = run.ask(request());
+  while (!checks) await new Promise((resolve) => setImmediate(resolve));
+  const paused = f.time.now();
+  await assert.rejects(run.ask(request()), /HTTP 429/);
+  release();
+  await first;
+  await run.close();
+  assert.deepEqual(f.sent.map(({ url }) => url), [CATALOG, CATALOG, ENDPOINT, CATALOG, ENDPOINT]);
+  assert.ok(f.time.now() >= paused + 5000);
+  const limits = JSON.parse(readFileSync(path.join(f.dir, "decision-gate/limits/openrouter/accounts/default.json"), "utf8"));
+  assert.equal(limits.starts.length, 2);
+  assert.ok(limits.starts.at(-1).at >= paused + 5000);
 });
 
 test("metadata, logging, plugins, fallback models and unknown fields cannot reach OpenRouter", async (t) => {
@@ -216,26 +250,32 @@ test("contacts are allowed only in an explicit enforced ZDR run; defaults and cu
   await assert.rejects(ask(f.open({ neverSend: file }), body, { customerValues: "zdr" }), /never-send/);
 });
 
-test("credentials in state, questions or field names remain refused inside ZDR scope", async (t) => {
+test("credentials in state, questions or field names are refused in default and ZDR runs", async (t) => {
   const f = setup(t);
-  for (const text of ["Bearer abcdefghijklmnopqrst", "sk-or-v1-" + "a1".repeat(32), "password='private-value'", "ghp_" + "a1".repeat(20), "fixture-openrouter"]) {
-    for (const body of [request(text), { ...request(), questions: { q: { type: "noul", instructions: text } } }, request({ [text]: "public" })]) {
-      await assert.rejects(ask(f.open(), body, { customerValues: "zdr" }), /never-send/);
+  for (const customerValues of ["never-send", "zdr"]) {
+    for (const text of ["Bearer abcdefghijklmnopqrst", "sk-or-v1-" + "a1".repeat(32), "SK-OR-V1-" + "A1".repeat(32), "password='private-value'", "ghp_" + "a1".repeat(20), "fixture-openrouter"]) {
+      for (const body of [request(text), { ...request(), questions: { q: { type: "noul", instructions: text } } }, request({ [text]: "public" })]) {
+        await assert.rejects(ask(f.open(), body, { customerValues }), /never-send/);
+      }
     }
   }
   assert.equal(f.sent.length, 0);
 });
 
 test("approved response identities pass; other model, provider and caller model identities fail", async (t) => {
-  for (const model of [MODEL, VERSION]) await ask(setup(t, { answer: () => response({ model }) }).open(), { ...request(), model: MODEL });
+  for (const model of [MODEL, VERSION]) {
+    for (const caller of [undefined, PINNED_MODEL]) await ask(setup(t, { answer: () => response({ model }) }).open(), { ...request(), model: caller });
+  }
   for (const fields of [{ model: PINNED_MODEL }, { model: "~typesafe/jev-latest" }, { model: "typesafe/jev-1.13-20261013" }, { model: "typesafe-ai/jev" }, { provider: "Other" }, { provider: undefined }]) {
     const f = setup(t, { answer: () => response(fields) });
     await assert.rejects(ask(f.open()), /unexpected model or provider/);
     assert.equal(f.sent.length, 2);
   }
-  const f = setup(t);
-  await assert.rejects(ask(f.open(), { ...request(), model: "typesafe-ai/jev" }), /model must be/);
-  assert.equal(f.sent.length, 0);
+  for (const model of [MODEL, VERSION, "typesafe-ai/jev"]) {
+    const f = setup(t);
+    await assert.rejects(ask(f.open(), { ...request(), model }), /model must be/);
+    assert.equal(f.sent.length, 0);
+  }
 });
 
 test("all three typed answers are validated against the requested question keys and criteria", async (t) => {
