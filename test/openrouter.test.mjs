@@ -189,6 +189,27 @@ for (const [name, lockedChecks] of Object.entries({ refreshed: 1, refused: 2 }))
   });
 }
 
+test("an abort while waiting for the limiter's lock releases the unsent attempt's spend", async (t) => {
+  const controller = new AbortController();
+  const reason = new Error("fixture cancellation");
+  let now = Date.UTC(2026, 9, 13, 18), lock;
+  const time = { now: () => now, sleep: async (ms) => {
+    now += ms;
+    if (lock) { controller.abort(reason); rmSync(lock, { recursive: true, force: true }); lock = undefined; }
+  } };
+  const f = setup(t, { catalog: () => {
+    lock = path.join(f.dir, "decision-gate/limits/openrouter/accounts/default.json.lock");
+    mkdirSync(lock);
+    writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ host: hostname(), pid: 1, token: randomUUID() }));
+    return new Response(JSON.stringify({ data: [eligible()] }), { headers: { date: new Date(now).toUTCString() } });
+  } });
+  const run = f.open({ time }).run();
+  await assert.rejects(run.ask(request(), { signal: controller.signal }), (error) => error === reason);
+  await run.close();
+  assert.deepEqual(f.sent.map(({ url }) => url), [CATALOG]);
+  assert.equal(run.summary().committed_usd, 0);
+});
+
 test("metadata, logging, plugins, fallback models and unknown fields cannot reach OpenRouter", async (t) => {
   for (const [key, value] of Object.entries({ metadata: { logging: true }, models: ["other"], plugins: [{ id: "broadcast" }], route: "fallback", log: true, usage: { include: true } })) {
     const f = setup(t);
