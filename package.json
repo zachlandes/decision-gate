@@ -1,6 +1,6 @@
 {
   "name": "decision-gate",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Rate and spend limits for calling TypeSafe Jev from Node: an account-wide 429 pause with backoff, a shared rate limiter, a per-key daily spend ceiling, an answer cache that stores no text, and never-send checks",
   "type": "module",
   "files": [
