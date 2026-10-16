@@ -64,8 +64,87 @@ try {
 }
 ```
 
-The request's `model` is optional; the gate sets it.
-A request that names a model other than `PINNED_MODEL` is refused.
+The request's `model` is optional.
+It defaults to `jev-1.13.0`, exported as `PINNED_MODEL`.
+The gate accepts only the exact versions `jev-1.13.0` and `jev-1.14.0`.
+It refuses floating aliases such as `jev-latest` and `jev-preview`, provider wire IDs, and any other version.
+
+## Selecting an exact Jev version
+
+To use 1.14, set `model` when you open the caller, so its asks and its caches use 1.14 together:
+
+```js
+const jev = openJev({ tool: "job-screen", model: "jev-1.14.0", notice: console.error });
+const cache = jev.cache({ scope: { questions } });
+const run = jev.run();
+try {
+  const result = await run.ask({ state: "A public example", questions });
+  console.log(result.model); // The exact provider model that answered
+} finally {
+  await run.close();
+}
+```
+
+One ask can use a different version from its caller by setting `request.model`.
+If you cache that ask's answers, open the cache with the same `model`: `jev.cache({ scope, model: "jev-1.14.0" })`.
+A cache is tied to one version when you open it.
+It does not follow later requests, and it does not check the probabilities you put in.
+So never put an answer from one version into a cache opened for another.
+Caches for different versions stay separate, even when their scope and keys are the same.
+`PINNED_MODEL` still names 1.13, so existing imports keep working, and `ALLOWED_MODELS` exports the full list.
+Each response keeps the exact model ID the provider returned, and the gate also reports that ID through `notice`, without any request text.
+Thresholds tuned on 1.13 are not tuned for 1.14, so evaluate them again before you rely on them with 1.14.
+
+## Preview Box
+
+[Box](https://docs.typesafe.ai/primitives/box.md) finds one target in an image and returns its bounding box.
+TypeSafe marks Box and image input as **not production-ready**, so their format, limits and accuracy can change.
+To use Box, select `jev-1.14.0` and pass `{ previewBox: true }` on every ask that has a Box question.
+The gate refuses Box on 1.13, and Box without that option, before it sends anything.
+All three routes accept the preview request: native TypeSafe, Vercel AI Gateway and the ZDR OpenRouter route.
+
+```js
+import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { openJev } from "decision-gate";
+
+const jev = openJev({ tool: "box-prototype", model: "jev-1.14.0" });
+const run = jev.run();
+const photo = randomUUID();
+try {
+  const result = await run.ask({
+    state: { photo },
+    assets: { [photo]: { type: "image", format: "png", data_base64: readFileSync("photo.png").toString("base64") } },
+    questions: {
+      present: { type: "noul", instructions: "Is there a coffee mug in `photo`?" },
+      mug: { type: "box", instructions: "the coffee mug in `photo`" }
+    }
+  }, { previewBox: true });
+  console.log(result.model, result.answers.present.noul, result.answers.mug);
+} finally {
+  await run.close();
+}
+```
+
+A Box answer looks like `{ type: "box", box: { top, bottom, left, right }, confidence }`.
+Each edge and the confidence is a fraction from 0 to 1, with `top < bottom` and `left < right`.
+Edges are measured from the top-left corner: `top` and `bottom` as a fraction of the image height, `left` and `right` as a fraction of its width.
+The gate checks these bounds before it returns the answer.
+Box takes `instructions`, not `criteria`, and it **has no not-found answer**: it returns a box even when the target is not in the image.
+So ask a Noul presence question in the same request, as in the example, and use the box only when the Noul probability passes a threshold you have tested on your own images.
+Both questions run in the same request: the Noul decides whether your code uses the box, but the model computes the box either way.
+
+Only requests with an opted-in Box question carry the `TypeSafe-Danger-Zone-Images: true` header, and so do their retries.
+Images go in the JSON `assets` field as base64 PNG or JPEG.
+Multipart uploads, image URLs, SDK image objects and image-only Noul requests are not supported.
+To ask a Noul question about an image, include it in a request with a Box question, as above.
+Follow TypeSafe's [image preparation and limits](https://docs.typesafe.ai/images.md): a still PNG or JPEG, 280 to 1568 pixels on each side.
+The gate estimates request size from bytes and counts base64 conservatively, so it can refuse an image the API would accept.
+It cannot predict image token usage; the service still checks the real context limit.
+Image input tokens appear in reported usage and are booked at the text price.
+The answer cache holds single numbers from 0 to 1, so it cannot store a Box answer's coordinates; it will store a Box confidence only if you put that number in yourself.
+Never-send checks read serialized text only.
+They cannot see pixels or text inside base64 data, so remove sensitive content from an image before you send it.
 
 ## What it guarantees
 
@@ -96,8 +175,9 @@ The default run ceiling covers about 476,000, so a long screening job opens a ru
 A Jev request carries one `state` and any number of named `questions`, and the gate sends it as one request: one rate-limit slot, and the state's input tokens paid once however many questions it asks.
 When the state is most of the request, as a job posting usually is, three questions in one call cost little more than one, and use a third of the requests.
 
-**Nothing forbidden by the run's never-send policy leaves the machine.**
-Every request is checked, including each retry, and one containing a forbidden value is refused with a `RedactionError` rather than rewritten.
+**Forbidden text in a request is refused before it is sent.**
+Every request is checked, including each retry, and one containing a forbidden text value is refused with a `RedactionError` rather than rewritten.
+This check reads text only: it cannot see pixels or text inside base64 data, so remove sensitive content from preview images before they reach the gate.
 The built-in rules cover known secret formats and email addresses.
 They also rewrite the value after an `authorization`, `proxy-authorization` or `auth` key, as a header, a JSON or YAML key or a parameter, in only two shapes.
 One is an HTTP authentication scheme, such as `Basic`, `Bearer`, `Token`, `Digest`, `Negotiate` or `AWS4-HMAC-SHA256`, followed by a credential, redacted with its parameters to the end of its quotes or line.
@@ -108,10 +188,11 @@ Redact text with `jev.redactor.redact` before putting it in a request.
 
 ## Using Jev through Vercel AI Gateway
 
-> **Experimental and unpinned.**
+> **Experimental route, pinned version.**
 > The `vercel-ai-gateway` provider sends requests through Vercel AI Gateway instead of to TypeSafe directly.
-> It sends the floating model id `typesafe-ai/jev`, not `jev-1.13.0`, so the Jev version that answers can change without notice, and thresholds tuned on `jev-1.13.0` may not hold.
-> `jev.config.pinned` is `false` for it.
+> It sends `typesafe-ai/jev-1.13.0` by default, or `typesafe-ai/jev-1.14.0` when the caller selects 1.14.
+> Both versioned IDs are in the [gateway catalog](https://ai-gateway.vercel.sh/v1/models), checked 2026-10-16.
+> `jev.config.pinned` is `true`, and the gate no longer uses the floating `typesafe-ai/jev` ID.
 
 Choose it by name, with `"provider": "vercel-ai-gateway"` in the config or `DECISION_GATE_PROVIDER=vercel-ai-gateway`, and export `AI_GATEWAY_API_KEY`.
 The gate never picks a provider from whichever key variable happens to be set, since other tools export those keys for their own use.
@@ -128,15 +209,18 @@ Its defaults are conservative guesses, not measurements: 60 requests a minute an
 Each ask is retried once, not twice, and a `429` without `Retry-After` pauses the gateway's callers for five seconds.
 A `429` the gate cannot avoid still fails the ask after that pause and retry.
 
-Answers cached through an unpinned provider expire within a day, because the model behind it can change without notice.
+Gateway answers are now cached under exact model IDs and expire after 30 days, as TypeSafe's do.
+Cache files from the old floating route are not reused.
 
 ## Using Jev through OpenRouter with zero data retention
 
 Choose `DECISION_GATE_PROVIDER=openrouter` (or `"provider": "openrouter"` in config) and supply `OPENROUTER_API_KEY`.
 The fixed destination is `https://openrouter.ai/api/v1/systemone`, the [documented TypeSafe SDK surface](https://openrouter.ai/docs/guides/community/typesafe-sdk), not chat completions.
-The gate sends `typesafe/jev-1.13` and accepts only that response model or `typesafe/jev-1.13-20260917`, with response provider `TypeSafe`.
-It validates Noul, Choice and Score answers against the requested question names, types and criteria before returning them.
-Vercel's floating model is not this route.
+The gate sends `typesafe/jev-1.13` by default or `typesafe/jev-1.14` for a 1.14 request, always requiring response provider `TypeSafe`.
+A 1.13 response must name `typesafe/jev-1.13` or `typesafe/jev-1.13-20260917`; a 1.14 response must name `typesafe/jev-1.14` or `typesafe/jev-1.14-20261014`.
+It validates Noul, Choice, Score and preview Box answers against the requested question names and types, plus their criteria or coordinate bounds.
+The [1.13 endpoint catalog](https://openrouter.ai/api/v1/models/typesafe/jev-1.13/endpoints), [1.14 endpoint catalog](https://openrouter.ai/api/v1/models/typesafe/jev-1.14/endpoints) and ZDR catalog list both versions, checked 2026-10-16.
+The general OpenRouter model list omits these evaluation models; it is not evidence that a version is unavailable.
 
 Every OpenRouter attempt, including retries, forces these provider preferences:
 
@@ -145,11 +229,11 @@ Every OpenRouter attempt, including retries, forces these provider preferences:
 ```
 
 A request carrying its own `provider` field is refused before anything is sent, whatever it holds; the gate adds the preferences above itself.
-Only `model`, `state` and `questions` are accepted as top-level request fields; metadata, plugins, logging, fallback models and other passthrough fields are refused.
+Only `model`, `state`, `questions` and preview Box `assets` are accepted as top-level request fields; metadata, plugins, logging, fallback models and other passthrough fields are refused.
 Questions accept only `type`, `instructions` and `criteria`.
 
 Immediately before each paid attempt, after rate/spend waits, the gate fetches the public [ZDR endpoint catalog](https://openrouter.ai/api/v1/endpoints/zdr) without credentials or local caching.
-It requires exactly one TypeSafe endpoint for this model, named `TypeSafe | typesafe/jev-1.13-20260917`, with the expected provider tag, price and context limits.
+It requires exactly one TypeSafe endpoint for the requested model, named `TypeSafe | typesafe/jev-1.13-20260917` or `TypeSafe | typesafe/jev-1.14-20261014` as appropriate, with the expected provider tag, price and advertised capacity.
 It refuses missing, changed, ambiguous, unreadable or unavailable eligibility, redirects, undated responses and catalogs older than 60 seconds by HTTP Date or Age; at most five seconds of future server clock skew is accepted.
 A retry cannot reuse a previous attempt's catalog check.
 After the check, the attempt is confirmed against the account's pause and rate window at the moment it is sent; if another caller recorded a pause meanwhile, it waits that out and checks the catalog again.
@@ -183,16 +267,18 @@ A later default run on the same client still refuses email.
 OpenRouter has its own key files, spend ledger, rate window and pauses, never another provider's key or fallback.
 Use `"openrouter": { "key_file": "~/.config/decision-gate/openrouter-key" }` for its config key file, or `key: { provider: "openrouter", value }` for a private in-memory credential.
 Its conservative rate defaults are 60 requests/minute, 250,000 tokens/second and 2 in flight; these are not measured OpenRouter account limits.
-Its catalog reports 64,000 whole-request tokens and 32,000 state-plus-question tokens, which the gate estimates before sending.
+Its catalog now advertises 262,144-token long-context capacity for both versions.
+The gate still enforces its conservative 64,000 whole-request and 32,000 state-plus-question estimates and never sends the long-context header.
 Spend remains conservatively reserved at the existing 65,536-token bound and booked at USD 0.042 per million reported input tokens, output free, not from caller metadata or an arbitrary response cost.
 `DECISION_GATE_ENDPOINT` overrides are refused for OpenRouter, including loopback; use injected `fetch` for offline tests.
 No credential or inference call is needed to run the tests.
 
 ## Opening the gate
 
-`openJev({ tool, key, neverSend, spend, maxRetries, env, notice, fetch })` opens a caller.
+`openJev({ tool, model, key, neverSend, spend, maxRetries, env, notice, fetch })` opens a caller.
+`model` selects the exact default version for this caller's asks and caches, with 1.13 as the default.
 `tool` is required: a short identifier such as `herdr-find` that tags the caller's spend records, not a different service.
-`notice` receives one-line warnings and defaults to a no-op.
+`notice` receives one-line warnings and the answering model for each validated response; it defaults to a no-op.
 `spend` accepts `perRunUsd` and `perDayUsd`, defaulting to the config's USD 0.02 and USD 0.20.
 The config's daily ceiling covers the key across every tool that uses it; a caller's `perDayUsd` can only lower what that tool spends, never add to the key's.
 Each run defaults to `customerValues: "never-send"`; only OpenRouter permits the explicit `customerValues: "zdr"` run scope described above.
@@ -268,14 +354,14 @@ A tool that sends requests in parallel should size its pool from `jev.config.lim
 
 ```js
 const run = jev.run({ capUsd });
-await run.ask(request, { signal });
+await run.ask(request, { signal, previewBox: false });
 run.summary();
 await run.close();
 ```
 
 `capUsd` can lower the per-run ceiling, never raise it.
-A request's `model` may be omitted or `PINNED_MODEL` for any provider.
-The gate sends the provider's own model id and refuses any other value.
+A request's `model` may be omitted to use the caller's version, or be an exact ID from `ALLOWED_MODELS`.
+The gate maps it to the provider's versioned wire ID and refuses versions unavailable on that route.
 Raw requests are checked, not silently rewritten: a forbidden value in any serialized field or its decoded JSON form prevents the request.
 Callers that send user text redact it first with `jev.redactor.redact`, and `jev.redactor.check(body)` runs the same final check on a serialized request before anything is queued.
 `jev.redactor.clean(text)` is true when one piece of text would pass that check as a string in a request: nothing forbidden survives in it and the built-in rules would leave it unchanged.
@@ -304,13 +390,14 @@ Use `describeError` for a safe diagnostic instead of logging a transport excepti
 The errors it passes through are `ConfigError`, `ServiceError` (with the HTTP `status`), `SpendCapError`, `RedactionError`, `RequestSizeError` and `StateError`; none carries request text.
 
 `PINNED_MODEL`, `MAX_INPUT_TOKENS`, `MAX_STATE_QUESTION_TOKENS`, `usdFor(tokens)` and `estimateUsd(bytes)` describe the pinned model's request limits and price, which the gate also books for the gateway and OpenRouter.
-`jev.config.provider`, `jev.config.model` and `jev.config.pinned` say which provider and model id a caller's requests go to, and whether that model is pinned.
+`jev.config.provider`, `jev.config.model`, `jev.config.modelVersion` and `jev.config.pinned` report the provider, default wire ID, canonical version and pin status.
+An ask's explicit model override is reflected in its response and notice, not by mutating the caller's config.
 `estimateUsd` uses the measured rate of about a quarter token per byte, for figures shown before a run; it is not a reservation.
 
 ## Answer cache
 
 ```js
-const cache = jev.cache({ scope: { prompt: "line-v1", query }, enabled: true });
+const cache = jev.cache({ scope: { prompt: "line-v1", query }, model: "jev-1.14.0", enabled: true });
 cache.get(key); // a probability, or undefined
 await cache.put([[key, 0.93]]);
 ```
@@ -318,8 +405,9 @@ await cache.put([[key, 0.93]]);
 The cache stores probabilities under caller-supplied string keys, and never the keys themselves.
 Each key is stored as an HMAC under a private random key, so short keys such as source lines cannot be guessed from the stored hashes.
 Entries are filed by the caller's `scope` together with the provider, model, endpoint and never-send list, so changing any of them starts a fresh file.
+The cache's `model` defaults to the version selected in `openJev`; name it explicitly when caching an ask that overrides the caller's version.
 Entries hold only key hashes, probabilities and times.
-They expire after 30 days, or a day for an unpinned provider; a file mostly made of expired or superseded rows is rewritten on its next write, and files are evicted to keep the cache within 50 MiB.
+They expire after 30 days; a file mostly made of expired or superseded rows is rewritten on its next write, and files are evicted to keep the cache within 50 MiB.
 A cache that cannot be read or written warns once through `notice` and continues without caching, not without spend accounting.
 
 ## Request ownership and persisted state
@@ -379,11 +467,13 @@ This can refuse a very small allowance even when a displayed estimate is lower.
 
 Native TypeSafe, experimental Vercel AI Gateway and pinned ZDR-enforced OpenRouter are implemented; all speak TypeSafe's API through the same SDK responder.
 OpenRouter extends that owner with request-policy, catalog-eligibility and typed-response validation hooks.
-The public OpenRouter [SDK surface](https://openrouter.ai/docs/guides/community/typesafe-sdk), [routing fields](https://openrouter.ai/docs/guides/routing/provider-selection), [ZDR policy and catalog](https://openrouter.ai/docs/guides/features/zdr) and [model endpoint catalog](https://openrouter.ai/api/v1/models/typesafe/jev-1.13/endpoints) were checked on 2026-10-13.
-A provider keeps its name, key variable, model id and whether it is pinned, price, endpoint, limit defaults and retry settings together, and its state is filed under its name, so adding one needs no migration.
+The public OpenRouter [SDK surface](https://openrouter.ai/docs/guides/community/typesafe-sdk), [routing fields](https://openrouter.ai/docs/guides/routing/provider-selection), [ZDR policy and catalog](https://openrouter.ai/docs/guides/features/zdr) and versioned endpoint catalogs inform this route.
+The versioned catalogs and current capacity were checked again on 2026-10-16.
+A provider keeps its name, key variable, exact version-to-wire-ID mapping and pin status, price, endpoint, limit defaults and retry settings together, and its state is filed under its name, so adding one needs no migration.
 Another provider needs a known price, where zero counts for a local model, and comparable typed probabilities before it can support these ceilings and callers' thresholds.
 
 The pinned `@typesafe-ai/sdk` version is 0.6.0, with no runtime dependencies or install hooks.
 Its published ESM entry point was inspected for credentials, logging, HTTP destinations, retries and filesystem or execution side effects.
 SDK logging is explicitly off because debug logging can include request bodies.
+Version selection and preview Box reuse this responder; SDK 0.6.0 passes JSON assets and Box questions through without a dependency change.
 All local state and key-file access belong to decision-gate.

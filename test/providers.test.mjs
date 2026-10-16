@@ -95,15 +95,15 @@ test("a key goes only to the provider it belongs to, with no fallback to another
   assert.throws(() => setup(t, { config: { "vercel-ai-gateway": { key_file: "k", in_flight: 1 } } }).open(), /holds only its key_file/);
 });
 
-test("the gate owns the wire model, and the gateway's is floating", async (t) => {
+test("the gate owns exact wire models on both routes", async (t) => {
   const f = setup(t, { config: { provider: "vercel-ai-gateway" } });
   const jev = f.open();
-  assert.deepEqual([jev.config.provider, jev.config.model, jev.config.pinned, jev.config.endpoint], ["vercel-ai-gateway", "typesafe-ai/jev", false, GATEWAY]);
+  assert.deepEqual([jev.config.provider, jev.config.model, jev.config.pinned, jev.config.endpoint], ["vercel-ai-gateway", "typesafe-ai/jev-1.13.0", true, GATEWAY]);
   await ask(jev, request("omitted"));
   await ask(jev, request("pinned id", PINNED_MODEL));
-  assert.deepEqual(f.sent.map(({ body }) => body.model), ["typesafe-ai/jev", "typesafe-ai/jev"]);
-  await assert.rejects(ask(jev, request("other", "jev-2.0.0")), /model must be omitted or jev-1.13.0/);
-  await assert.rejects(ask(jev, request("wire id", "typesafe-ai/jev")), /model must be omitted or jev-1.13.0/);
+  assert.deepEqual(f.sent.map(({ body }) => body.model), ["typesafe-ai/jev-1.13.0", "typesafe-ai/jev-1.13.0"]);
+  await assert.rejects(ask(jev, request("other", "jev-2.0.0")), /model must be omitted or one of jev-1.13.0, jev-1.14.0/);
+  await assert.rejects(ask(jev, request("wire id", "typesafe-ai/jev")), /floating aliases and other ids are refused/);
   assert.equal(f.sent.length, 2);
 
   const native = setup(t);
@@ -180,18 +180,18 @@ test("the gateway provider's endpoint takes only a loopback stand-in", async (t)
     for await (const chunk of req) body += chunk;
     seen.push([req.url, req.headers.authorization, JSON.parse(body).model]);
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ model: "typesafe-ai/jev", answers: { q: { type: "noul", noul: 0.6 } }, usage: { input_tokens: 100 } }));
+    res.end(JSON.stringify({ model: "typesafe-ai/jev-1.13.0", answers: { q: { type: "noul", noul: 0.6 } }, usage: { input_tokens: 100 } }));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   const f = setup(t, { env: { DECISION_GATE_PROVIDER: "vercel-ai-gateway", DECISION_GATE_ENDPOINT: `http://127.0.0.1:${server.address().port}/typesafe/v1/systemone` } });
   const jev = openJev({ env: f.env, tool: "fixture" });
   assert.equal((await ask(jev, request("public"))).answers.q.noul, 0.6);
-  assert.deepEqual(seen, [["/typesafe/v1/systemone", "Bearer fixture-gateway", "typesafe-ai/jev"]]);
+  assert.deepEqual(seen, [["/typesafe/v1/systemone", "Bearer fixture-gateway", "typesafe-ai/jev-1.13.0"]]);
   assert.throws(() => openJev({ env: { ...f.env, DECISION_GATE_ENDPOINT: "https://ai-gateway.vercel.sh.example/typesafe/v1/systemone" }, tool: "fixture" }), /numeric HTTP loopback URL/);
 });
 
-test("answers cached through the unpinned gateway expire within a day", async (t) => {
+test("answers cached through pinned providers expire after 30 days", async (t) => {
   const hour = 3600000;
   let now = Date.UTC(2026, 8, 26, 12);
   const time = { now: () => now, sleep: async () => {} };
@@ -203,7 +203,7 @@ test("answers cached through the unpinned gateway expire within a day", async (t
     return (hours) => { now = Date.UTC(2026, 8, 26, 12) + hours * hour; return jev.cache({ scope }).get("item"); };
   };
   const gateway = await cached({ provider: "vercel-ai-gateway" });
-  assert.deepEqual([gateway(23), gateway(25)], [0.4, undefined]);
+  assert.deepEqual([gateway(25), gateway(29 * 24), gateway(31 * 24)], [0.4, 0.4, undefined]);
   const pinned = await cached(undefined);
   assert.deepEqual([pinned(25), pinned(29 * 24), pinned(31 * 24)], [0.4, 0.4, undefined]);
 });
