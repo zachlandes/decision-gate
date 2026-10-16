@@ -64,12 +64,14 @@ try {
 }
 ```
 
-The request's `model` is optional; it defaults to `jev-1.13.0` (`PINNED_MODEL`).
-Only `jev-1.13.0` and `jev-1.14.0` are allowlisted; floating aliases such as `jev-latest` and `jev-preview`, provider-specific wire IDs and other versions are refused.
+The request's `model` is optional.
+It defaults to `jev-1.13.0`, exported as `PINNED_MODEL`.
+The gate accepts only the exact versions `jev-1.13.0` and `jev-1.14.0`.
+It refuses floating aliases such as `jev-latest` and `jev-preview`, provider wire IDs, and any other version.
 
 ## Selecting an exact Jev version
 
-Opt into 1.14 for a caller and its caches together:
+To use 1.14, set `model` when you open the caller, so its asks and its caches use 1.14 together:
 
 ```js
 const jev = openJev({ tool: "job-screen", model: "jev-1.14.0", notice: console.error });
@@ -83,22 +85,23 @@ try {
 }
 ```
 
-An individual request can override the caller's version with `request.model`.
-When doing that, open its cache with the same explicit `model`: `jev.cache({ scope, model: "jev-1.14.0" })`.
-A cache is bound to its version when opened; it does not follow later requests or inspect the probabilities you put into it.
-Never put a response from one version into another version's cache.
-Versioned caches are separate even when the caller's scope and entry keys are identical.
-`PINNED_MODEL` remains the 1.13 default for existing imports; `ALLOWED_MODELS` exports the frozen list.
-The response retains the provider's exact `model`, and each validated response reports that model through `notice` without request text.
-Thresholds tuned on 1.13 need evaluation before use on 1.14; opting in does not recalibrate them.
+One ask can use a different version from its caller by setting `request.model`.
+If you cache that ask's answers, open the cache with the same `model`: `jev.cache({ scope, model: "jev-1.14.0" })`.
+A cache is tied to one version when you open it.
+It does not follow later requests, and it does not check the probabilities you put in.
+So never put an answer from one version into a cache opened for another.
+Caches for different versions stay separate, even when their scope and keys are the same.
+`PINNED_MODEL` still names 1.13, so existing imports keep working, and `ALLOWED_MODELS` exports the full list.
+Each response keeps the exact model ID the provider returned, and the gate also reports that ID through `notice`, without any request text.
+Thresholds tuned on 1.13 are not tuned for 1.14, so evaluate them again before you rely on them with 1.14.
 
 ## Preview Box
 
-[Box](https://docs.typesafe.ai/primitives/box.md) locates one target in an image.
-TypeSafe marks Box and images **not production-ready**; their format, limits and accuracy can change.
-Use `jev-1.14.0` and explicitly pass `{ previewBox: true }` to each Box ask.
-Box on 1.13 and Box without the preview option are refused before sending.
-Native TypeSafe, Vercel AI Gateway and the ZDR-enforced OpenRouter route all support the preview request shape.
+[Box](https://docs.typesafe.ai/primitives/box.md) finds one target in an image and returns its bounding box.
+TypeSafe marks Box and image input as **not production-ready**, so their format, limits and accuracy can change.
+To use Box, select `jev-1.14.0` and pass `{ previewBox: true }` on every ask that has a Box question.
+The gate refuses Box on 1.13, and Box without that option, before it sends anything.
+All three routes accept the preview request: native TypeSafe, Vercel AI Gateway and the ZDR OpenRouter route.
 
 ```js
 import { readFileSync } from "node:fs";
@@ -123,22 +126,25 @@ try {
 }
 ```
 
-The Box answer is `{ type: "box", box: { top, bottom, left, right }, confidence }`.
-All four edges and the confidence are fractions from 0 to 1; `top < bottom` and `left < right`.
-Edges are measured from the image's top-left corner, against its height for top/bottom and width for left/right.
-The gate checks these bounds before returning a Box.
-Box takes instructions, not criteria, and **has no not-found answer**: even an absent target produces a box.
-Pair it with a Noul presence check first, as above, and ignore the Box unless the Noul passes a presence threshold evaluated on your images.
-The questions run independently in the same request; the Noul controls whether your code consumes the Box, not whether the model computes one.
+A Box answer looks like `{ type: "box", box: { top, bottom, left, right }, confidence }`.
+Each edge and the confidence is a fraction from 0 to 1, with `top < bottom` and `left < right`.
+Edges are measured from the top-left corner: `top` and `bottom` as a fraction of the image height, `left` and `right` as a fraction of its width.
+The gate checks these bounds before it returns the answer.
+Box takes `instructions`, not `criteria`, and it **has no not-found answer**: it returns a box even when the target is not in the image.
+So ask a Noul presence question in the same request, as in the example, and use the box only when the Noul probability passes a threshold you have tested on your own images.
+Both questions run in the same request: the Noul decides whether your code uses the box, but the model computes the box either way.
 
-Only requests containing opted-in Box questions get `TypeSafe-Danger-Zone-Images: true`, including retries.
-This API supports JSON `assets` containing base64 PNG or JPEG data, not multipart uploads, image URLs, SDK image objects or image-only Noul requests.
-For a Noul presence judgment over an image, include it alongside Box as shown above.
-Follow TypeSafe's [image preparation and limits](https://docs.typesafe.ai/images.md): each dimension must be 280–1568 pixels, with a still PNG or JPEG.
-The gate's byte-based size estimate counts base64 conservatively and can reject images below the API's upload limits; it cannot predict image token usage, and the service still checks the actual context limits.
-Image input tokens are included in reported usage and booked at the same price as text.
-The existing cache stores scalar probabilities only, not Box coordinates or confidence objects.
-Never-send checks inspect serialized text, not pixels or text hidden by base64 encoding; scrub sensitive image content locally before sending it.
+Only requests with an opted-in Box question carry the `TypeSafe-Danger-Zone-Images: true` header, and so do their retries.
+Images go in the JSON `assets` field as base64 PNG or JPEG.
+Multipart uploads, image URLs, SDK image objects and image-only Noul requests are not supported.
+To ask a Noul question about an image, include it in a request with a Box question, as above.
+Follow TypeSafe's [image preparation and limits](https://docs.typesafe.ai/images.md): a still PNG or JPEG, 280 to 1568 pixels on each side.
+The gate estimates request size from bytes and counts base64 conservatively, so it can refuse an image the API would accept.
+It cannot predict image token usage; the service still checks the real context limit.
+Image input tokens appear in reported usage and are booked at the text price.
+The answer cache holds single numbers from 0 to 1, so it cannot store a Box answer's coordinates; it will store a Box confidence only if you put that number in yourself.
+Never-send checks read serialized text only.
+They cannot see pixels or text inside base64 data, so remove sensitive content from an image before you send it.
 
 ## What it guarantees
 
@@ -169,9 +175,9 @@ The default run ceiling covers about 476,000, so a long screening job opens a ru
 A Jev request carries one `state` and any number of named `questions`, and the gate sends it as one request: one rate-limit slot, and the state's input tokens paid once however many questions it asks.
 When the state is most of the request, as a job posting usually is, three questions in one call cost little more than one, and use a third of the requests.
 
-**Forbidden serialized text is refused before sending.**
+**Forbidden text in a request is refused before it is sent.**
 Every request is checked, including each retry, and one containing a forbidden text value is refused with a `RedactionError` rather than rewritten.
-This does not inspect pixels or text hidden in base64; preview image content must be scrubbed before it reaches the gate.
+This check reads text only: it cannot see pixels or text inside base64 data, so remove sensitive content from preview images before they reach the gate.
 The built-in rules cover known secret formats and email addresses.
 They also rewrite the value after an `authorization`, `proxy-authorization` or `auth` key, as a header, a JSON or YAML key or a parameter, in only two shapes.
 One is an HTTP authentication scheme, such as `Basic`, `Bearer`, `Token`, `Digest`, `Negotiate` or `AWS4-HMAC-SHA256`, followed by a credential, redacted with its parameters to the end of its quotes or line.
@@ -182,11 +188,11 @@ Redact text with `jev.redactor.redact` before putting it in a request.
 
 ## Using Jev through Vercel AI Gateway
 
-> **Experimental route, exact version.**
+> **Experimental route, pinned version.**
 > The `vercel-ai-gateway` provider sends requests through Vercel AI Gateway instead of to TypeSafe directly.
 > It sends `typesafe-ai/jev-1.13.0` by default, or `typesafe-ai/jev-1.14.0` when the caller selects 1.14.
-> These versioned IDs are listed in the [gateway catalog](https://ai-gateway.vercel.sh/v1/models), checked 2026-10-16.
-> `jev.config.pinned` is `true`; the former floating `typesafe-ai/jev` route is no longer used.
+> Both versioned IDs are in the [gateway catalog](https://ai-gateway.vercel.sh/v1/models), checked 2026-10-16.
+> `jev.config.pinned` is `true`, and the gate no longer uses the floating `typesafe-ai/jev` ID.
 
 Choose it by name, with `"provider": "vercel-ai-gateway"` in the config or `DECISION_GATE_PROVIDER=vercel-ai-gateway`, and export `AI_GATEWAY_API_KEY`.
 The gate never picks a provider from whichever key variable happens to be set, since other tools export those keys for their own use.
@@ -203,8 +209,8 @@ Its defaults are conservative guesses, not measurements: 60 requests a minute an
 Each ask is retried once, not twice, and a `429` without `Retry-After` pauses the gateway's callers for five seconds.
 A `429` the gate cannot avoid still fails the ask after that pause and retry.
 
-Gateway caches now use exact model IDs and the same 30-day expiry as TypeSafe.
-Old floating-route cache files are not reused.
+Gateway answers are now cached under exact model IDs and expire after 30 days, as TypeSafe's do.
+Cache files from the old floating route are not reused.
 
 ## Using Jev through OpenRouter with zero data retention
 
