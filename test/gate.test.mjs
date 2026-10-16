@@ -351,13 +351,13 @@ test("a request over either context budget is refused before any send, and one j
   assert.equal(served, 1);
 });
 
-test("the gate sets the pinned wire model and refuses any other", async (t) => {
+test("the gate defaults to its pinned wire model and refuses unknown versions", async (t) => {
   const f = setup(t);
   const run = f.jev.run();
   const { model, ...unpinned } = request("public");
   assert.equal((await run.ask(unpinned)).answers.q.noul, 0.9);
   assert.equal(f.sent[0].model, model);
-  await assert.rejects(run.ask({ ...unpinned, model: "jev-0.0.1" }), /model must be omitted or jev-1.13.0/);
+  await assert.rejects(run.ask({ ...unpinned, model: "jev-0.0.1" }), /model must be omitted or one of jev-1.13.0, jev-1.14.0/);
   await run.close();
   assert.equal(f.sent.length, 1);
 });

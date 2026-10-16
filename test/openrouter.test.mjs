@@ -10,8 +10,10 @@ const ENDPOINT = "https://openrouter.ai/api/v1/systemone";
 const CATALOG = "https://openrouter.ai/api/v1/endpoints/zdr";
 const MODEL = "typesafe/jev-1.13";
 const VERSION = "typesafe/jev-1.13-20260917";
+const MODEL14 = "typesafe/jev-1.14";
+const VERSION14 = "typesafe/jev-1.14-20261014";
 const policy = { zdr: true, data_collection: "deny", allow_fallbacks: false, only: ["typesafe"] };
-const eligible = () => ({ name: `TypeSafe | ${VERSION}`, model_id: MODEL, provider_name: "TypeSafe", tag: "typesafe", pricing: { prompt: "0.000000042", completion: "0" }, context_length: 64000, max_prompt_tokens: 32000 });
+const eligible = (model = MODEL) => ({ name: `TypeSafe | ${model === MODEL14 ? VERSION14 : VERSION}`, model_id: model, provider_name: "TypeSafe", tag: "typesafe", pricing: { prompt: "0.000000042", completion: "0" }, context_length: 262144, max_prompt_tokens: 262144 });
 const request = (state = "public") => ({ state, questions: { q: { type: "noul", instructions: "Is this useful?" } } });
 const response = (fields = {}) => new Response(JSON.stringify({ model: VERSION, provider: "TypeSafe", answers: { q: { type: "noul", noul: 0.8 } }, usage: { input_tokens: 275, output_tokens: 0, cost: 999 }, ...fields }));
 
@@ -25,7 +27,7 @@ function setup(t, { config = {}, extraEnv = {}, catalog, answer } = {}) {
   const sent = [];
   const fetch = async (url, init) => {
     sent.push({ url, init, body: init.body ? JSON.parse(init.body) : undefined });
-    if (url === CATALOG) return catalog ? catalog({ now, sent, advance: (ms) => { now += ms; } }) : new Response(JSON.stringify({ data: [eligible()] }), { headers: { date: new Date(now).toUTCString() } });
+    if (url === CATALOG) return catalog ? catalog({ now, sent, advance: (ms) => { now += ms; } }) : new Response(JSON.stringify({ data: [eligible(), eligible(MODEL14)] }), { headers: { date: new Date(now).toUTCString() } });
     assert.equal(url, ENDPOINT);
     return answer ? answer({ body: JSON.parse(init.body), sent }) : response();
   };
@@ -315,7 +317,7 @@ test("approved response identities pass; other model, provider and caller model 
   for (const model of [MODEL, VERSION]) {
     for (const caller of [undefined, PINNED_MODEL]) await ask(setup(t, { answer: () => response({ model }) }).open(), { ...request(), model: caller });
   }
-  for (const fields of [{ model: PINNED_MODEL }, { model: "~typesafe/jev-latest" }, { model: "typesafe/jev-1.13-20261013" }, { model: "typesafe-ai/jev" }, { provider: "Other" }, { provider: undefined }]) {
+  for (const fields of [{ model: PINNED_MODEL }, { model: MODEL14 }, { model: VERSION14 }, { model: "~typesafe/jev-latest" }, { model: "typesafe/jev-1.13-20261013" }, { model: "typesafe-ai/jev" }, { provider: "Other" }, { provider: undefined }]) {
     const f = setup(t, { answer: () => response(fields) });
     await assert.rejects(ask(f.open()), /unexpected model or provider/);
     assert.equal(f.sent.length, 2);
@@ -347,10 +349,54 @@ test("all three typed answers are validated against the requested question keys 
   }
 });
 
-test("OpenRouter refuses oversized requests locally using its catalog's model limits", async (t) => {
+test("OpenRouter retains conservative default-context request limits despite the catalog's long-context capacity", async (t) => {
   const f = setup(t);
   await assert.rejects(ask(f.open(), request("x".repeat(129000))), /32000-token/);
   assert.equal(f.sent.length, 0);
+});
+
+test("each requested version requires its own eligible ZDR endpoint", async (t) => {
+  for (const [model, other] of [[PINNED_MODEL, MODEL14], ["jev-1.14.0", MODEL]]) {
+    const f = setup(t, { catalog: ({ now }) => new Response(JSON.stringify({ data: [eligible(other)] }), { headers: { date: new Date(now).toUTCString() } }) });
+    const run = f.open().run();
+    await assert.rejects(run.ask({ ...request(), model }), /pinned endpoint is missing/);
+    await run.close();
+    assert.equal(run.summary().committed_usd, 0);
+    assert.deepEqual(f.sent.map(({ url }) => url), [CATALOG]);
+  }
+});
+
+test("concurrent requests keep their own exact route and answering version", async (t) => {
+  const f = setup(t, { answer: async ({ body }) => {
+    await new Promise((resolve) => setImmediate(resolve));
+    return response({ model: body.model === MODEL14 ? VERSION14 : VERSION });
+  } });
+  const run = f.open().run();
+  const results = await Promise.all([PINNED_MODEL, "jev-1.14.0"].map((model) => run.ask({ ...request(), model })));
+  await run.close();
+  assert.deepEqual(results.map(({ model }) => model), [VERSION, VERSION14]);
+  assert.deepEqual(f.sent.filter(({ url }) => url === ENDPOINT).map(({ body }) => body.model).sort(), [MODEL, MODEL14]);
+});
+
+test("preview Box retries recheck 1.14 eligibility and preserve the danger-zone header and enforced ZDR", async (t) => {
+  let attempts = 0;
+  const answer = { type: "box", box: { top: 0.1, bottom: 0.9, left: 0.2, right: 0.8 }, confidence: 0.8 };
+  const f = setup(t, { answer: () => ++attempts === 1
+    ? new Response("{}", { status: 429, headers: { "retry-after-ms": "1" } })
+    : response({ model: VERSION14, answers: { box: answer } }) });
+  const run = f.open({ maxRetries: 1 }).run();
+  const result = await run.ask({ model: "jev-1.14.0", state: { photo: "fixture-image-ref" }, assets: { "fixture-image-ref": { format: "png", data_base64: "aW1hZ2U=" } }, questions: { box: { type: "box", instructions: "the square in `photo`" } } }, { previewBox: true });
+  await run.close();
+  assert.equal(result.model, VERSION14);
+  assert.deepEqual(result.answers.box, answer);
+  assert.deepEqual(f.sent.map(({ url }) => url), [CATALOG, ENDPOINT, CATALOG, ENDPOINT]);
+  for (const { body, init } of f.sent.filter(({ url }) => url === ENDPOINT)) {
+    assert.equal(body.model, MODEL14);
+    assert.deepEqual(body.provider, policy);
+    assert.equal(new Headers(init.headers).get("TypeSafe-Danger-Zone-Images"), "true");
+    assert.equal(new Headers(init.headers).has("TypeSafe-Danger-Zone-Long-Context"), false);
+    assert.equal(body.assets["fixture-image-ref"].data_base64, "aW1hZ2U=");
+  }
 });
 
 test("invalid responses are still charged, and diagnostics and persisted records carry no values", async (t) => {
